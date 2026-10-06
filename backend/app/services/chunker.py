@@ -1,7 +1,7 @@
 """Sentence chunking and narrative text packing service."""
 
 import re
-from typing import List, Dict, Any
+from typing import List
 
 
 def split_sentences(text: str, language: str = "en") -> List[str]:
@@ -179,21 +179,3 @@ def chunk_text(text: str, max_chars: int = 1000) -> List[str]:
 
     return [c.strip() for c in chunks if c.strip()]
 
-
-def chunk_page_text(page_text: str, page_number: int, language: str, start_index: int = 1) -> List[Dict[str, Any]]:
-    """Convert page text into indexed chunk dictionaries."""
-    sentences = split_sentences(page_text, language)
-    chunks: List[Dict[str, Any]] = []
-    current_index = start_index
-
-    for s in sentences:
-        chunks.append({
-            "chunk_index": current_index,
-            "page_number": page_number,
-            "text": s,
-            "audio_status": "pending",
-            "audio_path": None,
-        })
-        current_index += 1
-
-    return chunks

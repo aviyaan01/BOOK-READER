@@ -70,12 +70,19 @@ def is_bangla_text(text: str) -> bool:
     return bool(re.search(r"[\u0980-\u09FF]", text))
 
 
+_CACHED_RAW_VOICES: Optional[List[Dict[str, Any]]] = None
+
+
 async def list_voices(language: Optional[str] = None) -> List[Dict[str, Any]]:
     """Retrieve available Edge TTS voices filtered optionally by language ('en' or 'bn')."""
-    try:
-        raw_voices = await edge_tts.list_voices()
-    except Exception:
-        raw_voices = CURATED_VOICES
+    global _CACHED_RAW_VOICES
+    if _CACHED_RAW_VOICES is None:
+        try:
+            _CACHED_RAW_VOICES = await asyncio.wait_for(edge_tts.list_voices(), timeout=2.0)
+        except Exception:
+            _CACHED_RAW_VOICES = CURATED_VOICES
+
+    raw_voices = _CACHED_RAW_VOICES
 
     if not language:
         return raw_voices

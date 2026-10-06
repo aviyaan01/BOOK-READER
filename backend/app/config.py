@@ -39,7 +39,12 @@ ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022"
 
 
 def get_book_storage_dir(book_id: str) -> Path:
-    """Return the dedicated storage path for a book, creating the folder if needed."""
-    book_dir = STORAGE_DIR / book_id
+    """Return the dedicated storage path for a book without creating the directory."""
+    return STORAGE_DIR / book_id
+
+
+def create_book_storage_dir(book_id: str) -> Path:
+    """Create and return the dedicated storage path for a newly created book."""
+    book_dir = get_book_storage_dir(book_id)
     book_dir.mkdir(parents=True, exist_ok=True)
     return book_dir

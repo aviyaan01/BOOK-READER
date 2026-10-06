@@ -10,7 +10,6 @@ from backend.app.services.voice_cast import (
     DEFAULT_VOICE_POOL_BN,
     assign_voice_to_speaker,
     build_voice_segments,
-    compute_cast_hash,
     get_voice_pool,
     tag_sentences_with_claude,
     _extract_json_array,
@@ -221,19 +220,3 @@ def test_build_voice_segments_cast_consistency():
     _, voice2 = segs2[0]
     assert voice1 == voice2  # Same cast = same voice
 
-
-# ─────────────────────────────────────────────────────────────────────────────
-# compute_cast_hash
-# ─────────────────────────────────────────────────────────────────────────────
-
-def test_compute_cast_hash_deterministic():
-    h1 = compute_cast_hash("Once upon a time")
-    h2 = compute_cast_hash("Once upon a time")
-    assert h1 == h2
-    assert len(h1) == 16
-
-
-def test_compute_cast_hash_different_inputs():
-    h1 = compute_cast_hash("text A")
-    h2 = compute_cast_hash("text B")
-    assert h1 != h2

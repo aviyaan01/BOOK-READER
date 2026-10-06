@@ -12,6 +12,9 @@ ENV/
 
 # Environment files
 .env
+*.env
+.env.*
+!.env.example
 backend/.env
 *.env.local
 

@@ -1,9 +1,12 @@
 """SQLAlchemy and SQLite database session configuration."""
 
+import logging
 from typing import Generator
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker, Session
 from backend.app.config import DATABASE_URL
+
+logger = logging.getLogger(__name__)
 
 # SQLite engine configuration
 engine = create_engine(
@@ -40,8 +43,11 @@ def init_db() -> None:
             if "multi_voice" not in existing_columns:
                 conn.exec_driver_sql("ALTER TABLE books ADD COLUMN multi_voice BOOLEAN DEFAULT 0")
                 conn.commit()
-    except Exception:
-        pass
+            if "voice_cast" not in existing_columns:
+                conn.exec_driver_sql("ALTER TABLE books ADD COLUMN voice_cast JSON")
+                conn.commit()
+    except Exception as exc:
+        logger.warning("Database schema migration check failed: %s", exc, exc_info=True)
 
 
 def get_db() -> Generator[Session, None, None]:

@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Integer, Float, DateTime, ForeignKey, Text, Boolean
+from sqlalchemy import Column, String, Integer, Float, DateTime, ForeignKey, Text, Boolean, JSON
 from sqlalchemy.orm import relationship
 from backend.app.db import Base
 
@@ -29,6 +29,7 @@ class Book(Base):
     is_scanned = Column(Boolean, default=False, nullable=False)
     improve_with_ai = Column(Boolean, default=False, nullable=False)
     multi_voice = Column(Boolean, default=False, nullable=False)
+    voice_cast = Column(JSON, nullable=True)
     error_message = Column(Text, nullable=True)
     total_chunks = Column(Integer, default=0, nullable=False)
     done_chunks = Column(Integer, default=0, nullable=False)

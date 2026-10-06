@@ -1,16 +1,20 @@
 """Unit and integration tests for FastAPI endpoints in main.py."""
 
 import io
+import time
 import shutil
+import uuid
+import asyncio
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import patch, MagicMock
 import pytest
 from fastapi.testclient import TestClient
+from httpx import AsyncClient, ASGITransport
 
 from backend.app.main import app
 from backend.app.db import SessionLocal, Base, engine
 from backend.app.models import Book, Chunk
-from backend.app.config import get_book_storage_dir
+from backend.app.config import get_book_storage_dir, create_book_storage_dir
 
 
 @pytest.fixture(scope="module", autouse=True)
@@ -491,6 +495,7 @@ async def test_retry_service_only_regenerates_failed_chunks():
         db.commit()
         db.refresh(book)
         book_id = book.id
+        create_book_storage_dir(book_id)
 
         c0 = Chunk(
             book_id=book_id,
@@ -593,7 +598,7 @@ def test_upload_book_with_provider_selection(client):
     else:
         pdf_bytes = b"%PDF-1.4 dummy valid pdf bytes"
 
-    with patch("backend.app.main.process_book"):
+    with patch("backend.app.main.process_book"), patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test_api_key_123"}):
         response = client.post(
             "/api/books",
             data={
@@ -621,6 +626,346 @@ def test_upload_book_with_provider_selection(client):
         assert items[book_id]["provider"] == "elevenlabs"
     finally:
         client.delete(f"/api/books/{book_id}")
+
+
+def test_audio_endpoint_security_and_traversal(client):
+    """Verify security controls on GET /api/audio/{book_id}/{filename} against path traversal and invalid inputs."""
+    # 1. Test "../" traversal in book_id
+    res_dotdot = client.get("/api/audio/../chunk_001.mp3")
+    assert res_dotdot.status_code in (400, 404)
+    assert res_dotdot.status_code != 200
+
+    # 2. Test "%2e%2e" encoded traversal in book_id
+    res_encoded = client.get("/api/audio/%2e%2e/chunk_001.mp3")
+    assert res_encoded.status_code in (400, 404)
+    assert res_encoded.status_code != 200
+
+    # Double-encoded %252e%252e which reaches endpoint as '%2e%2e'
+    res_double_encoded = client.get("/api/audio/%252e%252e/chunk_001.mp3")
+    assert res_double_encoded.status_code in (400, 404)
+    assert res_double_encoded.status_code != 200
+
+    # 3. Test non-UUID string as book_id -> must return 400
+    res_non_uuid = client.get("/api/audio/not-a-valid-uuid-123/chunk_001.mp3")
+    assert res_non_uuid.status_code == 400
+    assert "UUID" in res_non_uuid.json().get("detail", "")
+
+    # 4. Test random non-existent UUID as book_id -> must return 404
+    non_existent_uuid = str(uuid.uuid4())
+    res_not_found = client.get(f"/api/audio/{non_existent_uuid}/chunk_001.mp3")
+    assert res_not_found.status_code == 404
+    assert f"Book with id '{non_existent_uuid}' not found." in res_not_found.json().get("detail", "")
+
+    # Create a real book in the database for filename testing
+    with SessionLocal() as db:
+        book = Book(
+            title="Audio Security Test Book",
+            language="en",
+            original_filename="security_test.pdf",
+            status="ready",
+        )
+        db.add(book)
+        db.commit()
+        db.refresh(book)
+        valid_book_id = book.id
+
+    try:
+        # 5. Test filename like "../../etc/passwd.mp3"
+        res_file_traversal = client.get(f"/api/audio/{valid_book_id}/../../etc/passwd.mp3")
+        assert res_file_traversal.status_code in (400, 404)
+        assert res_file_traversal.status_code != 200
+
+        # Filename regex validation (^chunk_\d{3,5}\.mp3$)
+        res_invalid_name = client.get(f"/api/audio/{valid_book_id}/passwd.mp3")
+        assert res_invalid_name.status_code == 400
+        assert "Invalid audio filename format" in res_invalid_name.json().get("detail", "")
+
+        res_invalid_digits = client.get(f"/api/audio/{valid_book_id}/chunk_1.mp3")
+        assert res_invalid_digits.status_code == 400
+
+        res_nonexistent_chunk = client.get(f"/api/audio/{valid_book_id}/chunk_001.mp3")
+        assert res_nonexistent_chunk.status_code == 404
+
+        # 6. Valid request that returns 200
+        book_dir = create_book_storage_dir(valid_book_id)
+        valid_chunk_file = book_dir / "chunk_001.mp3"
+        valid_chunk_file.write_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\xFF\xFB\x90\x44" * 50)
+
+        res_valid = client.get(f"/api/audio/{valid_book_id}/chunk_001.mp3")
+        assert res_valid.status_code == 200
+        assert "audio/mpeg" in res_valid.headers.get("content-type", "")
+        assert len(res_valid.content) > 0
+    finally:
+        book_dir = get_book_storage_dir(valid_book_id)
+        if book_dir.exists():
+            shutil.rmtree(book_dir, ignore_errors=True)
+        with SessionLocal() as db:
+            b = db.query(Book).filter(Book.id == valid_book_id).first()
+            if b:
+                db.delete(b)
+                db.commit()
+
+
+def test_get_book_storage_dir_does_not_mkdir():
+    """Verify get_book_storage_dir does not create directories for read operations, but create_book_storage_dir does."""
+    non_existent_id = "test-non-existent-read-id-9999"
+    test_path = get_book_storage_dir(non_existent_id)
+    assert not test_path.exists()
+
+    created_id = "test-created-write-id-9999"
+    try:
+        created_path = create_book_storage_dir(created_id)
+        assert created_path.exists()
+    finally:
+        del_path = get_book_storage_dir(created_id)
+        if del_path.exists():
+            shutil.rmtree(del_path, ignore_errors=True)
+
+
+def test_upload_book_magic_bytes_validation(client):
+    """Verify upload rejects files not starting with '%PDF-' and resets seek position for valid files."""
+    # 1. Invalid magic bytes
+    bad_pdf = io.BytesIO(b"NOT_A_PDF_CONTENT")
+    res_bad = client.post(
+        "/api/books",
+        data={"language": "en"},
+        files={"file": ("invalid_magic.pdf", bad_pdf, "application/pdf")},
+    )
+    assert res_bad.status_code == 400
+    assert "Invalid PDF file format" in res_bad.json()["detail"]
+    assert "%PDF-" in res_bad.json()["detail"]
+
+    # 2. Valid magic bytes: verifies seek(0) works and saves full content
+    valid_pdf_content = b"%PDF-1.5 Valid PDF stream content here"
+    valid_pdf = io.BytesIO(valid_pdf_content)
+    with patch("backend.app.main.process_book"):
+        res_ok = client.post(
+            "/api/books",
+            data={"language": "en"},
+            files={"file": ("valid_magic.pdf", valid_pdf, "application/pdf")},
+        )
+        assert res_ok.status_code == 201
+        book_id = res_ok.json()["id"]
+
+    try:
+        # Check that saved file on disk has the complete content from byte 0
+        saved_file = get_book_storage_dir(book_id) / "original.pdf"
+        assert saved_file.exists()
+        assert saved_file.read_bytes() == valid_pdf_content
+    finally:
+        client.delete(f"/api/books/{book_id}")
+
+
+def test_upload_book_streaming_size_limit(client):
+    """Verify 30MB limit is enforced while streaming to disk and partial file is unlinked."""
+    # Patch MAX_FILE_SIZE to 50 bytes to test streaming limit without memory overhead
+    with patch("backend.app.main.MAX_FILE_SIZE", 50):
+        # 100 bytes payload starting with valid %PDF-
+        payload = b"%PDF-" + b"A" * 95
+        res = client.post(
+            "/api/books",
+            data={"language": "en"},
+            files={"file": ("too_large.pdf", io.BytesIO(payload), "application/pdf")},
+        )
+        assert res.status_code == 400
+        assert "exceeds maximum allowed size" in res.json()["detail"]
+
+    # Ensure no leftover files or records in database matching too_large
+    with SessionLocal() as db:
+        book_in_db = db.query(Book).filter(Book.original_filename == "too_large.pdf").first()
+        assert book_in_db is None
+
+
+def test_upload_book_filename_sanitization_and_truncation(client):
+    """Verify filename path components are stripped and title & original_filename are truncated to 250 chars."""
+    long_name = ("nested_path_dir_" * 20) + "story.pdf"
+    traversal_filename = f"../../dangerous/subfolder/{long_name}"
+    long_title = "My Ultra Long Storybook Title That Exceeds Normal Limits " * 10
+    valid_pdf = io.BytesIO(b"%PDF-1.4 sample content")
+
+    with patch("backend.app.main.process_book"):
+        res = client.post(
+            "/api/books",
+            data={"language": "en", "title": long_title},
+            files={"file": (traversal_filename, valid_pdf, "application/pdf")},
+        )
+        assert res.status_code == 201
+        book_id = res.json()["id"]
+
+    try:
+        res_book = client.get(f"/api/books/{book_id}")
+        assert res_book.status_code == 200
+        data = res_book.json()
+
+        # Path components stripped
+        assert "/" not in data["original_filename"]
+        assert "\\" not in data["original_filename"]
+        assert ".." not in data["original_filename"]
+
+        # Truncated to <= 250 characters
+        assert len(data["original_filename"]) <= 250
+        assert len(data["title"]) <= 250
+        assert len(data["title"]) == 250
+    finally:
+        client.delete(f"/api/books/{book_id}")
+
+
+def test_upload_book_provider_whitelist(client):
+    """Verify unknown provider values return 400 instead of silently falling back."""
+    valid_pdf = io.BytesIO(b"%PDF-1.4 sample content")
+    res_bad = client.post(
+        "/api/books",
+        data={"language": "en", "provider": "unsupported_tts_engine"},
+        files={"file": ("story.pdf", valid_pdf, "application/pdf")},
+    )
+    assert res_bad.status_code == 400
+    assert "Invalid provider 'unsupported_tts_engine'" in res_bad.json()["detail"]
+    assert "Supported providers are 'edge_tts' and 'elevenlabs'" in res_bad.json()["detail"]
+
+
+def test_upload_book_language_and_voice_validation(client):
+    """Verify language and voice validations against the provider's voice list."""
+    # 1. Invalid language
+    valid_pdf = io.BytesIO(b"%PDF-1.4 sample content")
+    res_lang = client.post(
+        "/api/books",
+        data={"language": "es"},
+        files={"file": ("story.pdf", valid_pdf, "application/pdf")},
+    )
+    assert res_lang.status_code == 400
+    assert "Invalid language" in res_lang.json()["detail"]
+
+    # 2. Unknown voice for edge_tts
+    valid_pdf = io.BytesIO(b"%PDF-1.4 sample content")
+    res_voice_unknown = client.post(
+        "/api/books",
+        data={"language": "en", "provider": "edge_tts", "voice": "non_existent_voice_xyz"},
+        files={"file": ("story.pdf", valid_pdf, "application/pdf")},
+    )
+    assert res_voice_unknown.status_code == 400
+    assert "Invalid voice 'non_existent_voice_xyz'" in res_voice_unknown.json()["detail"]
+
+    # 3. Voice language mismatch for edge_tts (English voice with Bangla book)
+    valid_pdf = io.BytesIO(b"%PDF-1.4 sample content")
+    res_voice_mismatch = client.post(
+        "/api/books",
+        data={"language": "bn", "provider": "edge_tts", "voice": "en-US-AriaNeural"},
+        files={"file": ("story.pdf", valid_pdf, "application/pdf")},
+    )
+    assert res_voice_mismatch.status_code == 400
+    assert "Invalid voice 'en-US-AriaNeural'" in res_voice_mismatch.json()["detail"]
+
+    # 4. Unknown voice for elevenlabs
+    valid_pdf = io.BytesIO(b"%PDF-1.4 sample content")
+    with patch.dict("os.environ", {"ELEVENLABS_API_KEY": "test_key"}):
+        res_voice_eleven = client.post(
+            "/api/books",
+            data={"language": "en", "provider": "elevenlabs", "voice": "fake_eleven_voice"},
+            files={"file": ("story.pdf", valid_pdf, "application/pdf")},
+        )
+        assert res_voice_eleven.status_code == 400
+        assert "Invalid voice 'fake_eleven_voice'" in res_voice_eleven.json()["detail"]
+
+    # 5. Valid voice for edge_tts
+    valid_pdf = io.BytesIO(b"%PDF-1.4 sample content")
+    with patch("backend.app.main.process_book"):
+        res_voice_ok = client.post(
+            "/api/books",
+            data={"language": "en", "provider": "edge_tts", "voice": "en-US-AriaNeural"},
+            files={"file": ("story.pdf", valid_pdf, "application/pdf")},
+        )
+        assert res_voice_ok.status_code == 201
+        book_id = res_voice_ok.json()["id"]
+        client.delete(f"/api/books/{book_id}")
+
+
+def test_upload_book_elevenlabs_empty_api_key(client):
+    """Verify selecting elevenlabs provider with empty ELEVENLABS_API_KEY returns 400 with clear message."""
+    valid_pdf = io.BytesIO(b"%PDF-1.4 sample content")
+    with patch.dict("os.environ", {"ELEVENLABS_API_KEY": ""}), patch("backend.app.main.ELEVENLABS_API_KEY", ""):
+        res = client.post(
+            "/api/books",
+            data={"language": "en", "provider": "elevenlabs"},
+            files={"file": ("story.pdf", valid_pdf, "application/pdf")},
+        )
+        assert res.status_code == 400
+        detail = res.json()["detail"]
+        assert "ELEVENLABS_API_KEY is empty" in detail
+
+
+@pytest.mark.anyio
+async def test_health_responds_quickly_during_book_processing():
+    """Verify /health still responds quickly on the event loop while process_book runs worker threads."""
+    from backend.app.services.pipeline import process_book
+
+    book_id = str(uuid.uuid4())
+    with SessionLocal() as db:
+        book = Book(
+            id=book_id,
+            title="Concurrent Health Test Book",
+            language="en",
+            original_filename="original.pdf",
+            status="pending",
+        )
+        db.add(book)
+        db.commit()
+
+    book_dir = create_book_storage_dir(book_id)
+    pdf_path = book_dir / "original.pdf"
+    pdf_path.write_bytes(b"%PDF-1.4 dummy book content")
+
+    # Simulate heavy/blocking CPU/disk extraction in a thread
+    def slow_extract_pages(*args, **kwargs):
+        time.sleep(0.35)
+        return ["Chapter 1. The quick brown fox jumps over the lazy dog."], False
+
+    async def fake_synthesize(text, out_path, voice):
+        Path(out_path).touch()
+
+    mock_mp3 = MagicMock()
+    mock_mp3.info.length = 3.5
+
+    try:
+        with patch("backend.app.services.pipeline.extract_pages", side_effect=slow_extract_pages), \
+             patch("backend.app.services.tts.EdgeTTSProvider.synthesize", side_effect=fake_synthesize), \
+             patch("backend.app.services.pipeline.MP3", return_value=mock_mp3):
+
+            # Start process_book in the background on the asyncio event loop
+            proc_task = asyncio.create_task(process_book(book_id))
+
+            # Allow process_book to yield and enter slow_extract_pages on the worker thread
+            await asyncio.sleep(0.05)
+
+            # Query /health concurrently while slow_extract_pages is executing
+            transport = ASGITransport(app=app)
+            async with AsyncClient(transport=transport, base_url="http://test") as ac:
+                t0 = time.perf_counter()
+                res = await ac.get("/health")
+                elapsed = time.perf_counter() - t0
+
+            assert res.status_code == 200
+            assert res.json() == {"status": "ok"}
+            # The health check should respond well under the 0.35s extraction block time
+            assert elapsed < 0.25, f"Health check took {elapsed:.3f}s, expected < 0.25s"
+
+            # Wait for processing task to finish
+            await proc_task
+
+        with SessionLocal() as db:
+            b = db.query(Book).filter(Book.id == book_id).first()
+            assert b is not None
+            assert b.status == "ready"
+    finally:
+        if book_dir.exists():
+            shutil.rmtree(book_dir, ignore_errors=True)
+        with SessionLocal() as db:
+            b = db.query(Book).filter(Book.id == book_id).first()
+            if b:
+                db.delete(b)
+                db.commit()
+
+
+
 
 
 

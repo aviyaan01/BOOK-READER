@@ -1,6 +1,9 @@
 """Main entry point for the PDF Storyteller FastAPI application."""
 
+import os
+import re
 import shutil
+import uuid
 from pathlib import Path
 from contextlib import asynccontextmanager
 from typing import Dict, List, Optional, Any, AsyncGenerator
@@ -22,19 +25,24 @@ from sqlalchemy.orm import Session
 
 from backend.app.config import (
     CORS_ORIGIN,
+    STORAGE_DIR,
     get_book_storage_dir,
+    create_book_storage_dir,
     DEFAULT_ENGLISH_VOICE,
     DEFAULT_BANGLA_VOICE,
     DEFAULT_ELEVENLABS_VOICE,
     DEFAULT_TTS_PROVIDER,
+    ELEVENLABS_API_KEY,
 )
 from backend.app.db import init_db, get_db
 from backend.app.models import Book, Chunk
 from backend.app.services.pdf_extract import SCANNED_PDF_WARNING
 from backend.app.services.pipeline import process_book, retry_failed_chunks
+from backend.app.services.tts import get_tts_provider
 from backend.app.services.tts.edge_tts_provider import list_voices
 
 MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MB
+CHUNK_FILENAME_REGEX = re.compile(r"^chunk_\d{3,5}\.mp3$")
 
 
 @asynccontextmanager
@@ -79,6 +87,7 @@ async def create_book(
     background_tasks: BackgroundTasks,
     file: UploadFile = File(...),
     language: str = Form(...),
+    title: Optional[str] = Form(None),
     voice: Optional[str] = Form(None),
     provider: Optional[str] = Form(None),
     improve_with_ai: bool = Form(False),
@@ -91,6 +100,7 @@ async def create_book(
         background_tasks: FastAPI background tasks queue.
         file: Multipart uploaded PDF file (max 30MB).
         language: Language code, must be 'bn' (Bangla) or 'en' (English).
+        title: Optional custom book title (truncated to 250 characters).
         voice: Optional voice ID or name to use for speech narration.
         provider: Optional TTS provider ('elevenlabs' or 'edge_tts').
         improve_with_ai: Optional flag to run AI text cleanup using Anthropic Claude.
@@ -100,38 +110,109 @@ async def create_book(
     Returns:
         JSON response containing the created book ID and initial status.
     """
-    # 1. Validate language
-    lang_clean = language.strip().lower()
+    # 1. Strip path components from filename and check .pdf extension
+    raw_filename = file.filename or "uploaded.pdf"
+    clean_filename = Path(raw_filename.replace("\\", "/")).name.strip()
+    if not clean_filename:
+        clean_filename = "uploaded.pdf"
+
+    if not clean_filename.lower().endswith(".pdf"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file type. Only PDF documents (.pdf) are accepted.",
+        )
+
+    # 2. Read first 5 bytes and check magic number b"%PDF-", then seek back to 0
+    header = await file.read(5)
+    await file.seek(0)
+    if len(header) == 0:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Uploaded PDF file is empty (0 bytes).",
+        )
+    if header != b"%PDF-":
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid PDF file format. File must start with '%PDF-'.",
+        )
+
+    # 3. Truncate original_filename and title to 250 characters
+    original_filename = clean_filename[:250]
+    if title and title.strip():
+        book_title = title.strip()
+    else:
+        book_title = Path(clean_filename).stem.replace("_", " ").strip().title() or "Untitled Story"
+    book_title = book_title[:250]
+
+    # 4. Validate language ("bn"/"en")
+    lang_clean = (language or "").strip().lower()
     if lang_clean not in ("bn", "en"):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Invalid language. Supported values are 'bn' (Bangla) or 'en' (English).",
         )
 
-    # 2. Validate file type
-    filename = file.filename or ""
-    if not filename.lower().endswith(".pdf"):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid file type. Only PDF documents (.pdf) are accepted.",
-        )
-
-    # 3. Resolve TTS Provider & Voice
-    prov_raw = (provider or DEFAULT_TTS_PROVIDER).strip().lower()
-    if prov_raw in ("elevenlabs", "eleven_labs", "eleven-labs"):
-        chosen_provider = "elevenlabs"
-        default_voice = DEFAULT_ELEVENLABS_VOICE
+    # 5. Whitelist provider values ("edge_tts", "elevenlabs")
+    if provider is None or not provider.strip():
+        chosen_provider = DEFAULT_TTS_PROVIDER or "edge_tts"
     else:
-        chosen_provider = "edge_tts"
-        default_voice = DEFAULT_BANGLA_VOICE if lang_clean == "bn" else DEFAULT_ENGLISH_VOICE
+        prov_clean = provider.strip().lower()
+        if prov_clean in ("edge_tts", "edgetts"):
+            chosen_provider = "edge_tts"
+        elif prov_clean in ("elevenlabs", "eleven_labs", "eleven-labs"):
+            chosen_provider = "elevenlabs"
+        else:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid provider '{provider}'. Supported providers are 'edge_tts' and 'elevenlabs'.",
+            )
 
-    chosen_voice = voice.strip() if voice and voice.strip() else default_voice
-    book_title = Path(filename).stem.replace("_", " ").strip().title() or "Untitled Story"
+    # 6. Check ELEVENLABS_API_KEY when provider is "elevenlabs"
+    if chosen_provider == "elevenlabs":
+        api_key = os.getenv("ELEVENLABS_API_KEY") or ELEVENLABS_API_KEY
+        if not api_key or not api_key.strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="ElevenLabs provider is selected, but ELEVENLABS_API_KEY is empty. Please configure ELEVENLABS_API_KEY in your .env.",
+            )
 
+    # 7. Validate voice against the provider's voice list
+    p_instance = get_tts_provider(chosen_provider)
+    if voice and voice.strip():
+        voice_clean = voice.strip()
+        available_voices = await p_instance.list_voices(language=lang_clean)
+        valid_identifiers = set()
+        for v in available_voices:
+            for k in ("ShortName", "name", "Name", "voice_id"):
+                val = v.get(k)
+                if val:
+                    valid_identifiers.add(str(val).strip().lower())
+                    valid_identifiers.add(str(val).strip())
+        if chosen_provider == "elevenlabs":
+            from backend.app.services.tts.elevenlabs_provider import VOICE_NAME_TO_ID
+            for k in VOICE_NAME_TO_ID:
+                valid_identifiers.add(k.lower())
+
+        if voice_clean.lower() not in valid_identifiers and voice_clean not in valid_identifiers:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid voice '{voice}' for provider '{chosen_provider}' and language '{lang_clean}'.",
+            )
+        if chosen_provider == "elevenlabs":
+            chosen_voice = p_instance.resolve_voice(voice_clean)
+        else:
+            chosen_voice = voice_clean
+    else:
+        if chosen_provider == "elevenlabs":
+            chosen_voice = DEFAULT_ELEVENLABS_VOICE
+        else:
+            chosen_voice = DEFAULT_BANGLA_VOICE if lang_clean == "bn" else DEFAULT_ENGLISH_VOICE
+
+    # 8. Create Book record
     book = Book(
         title=book_title,
         language=lang_clean,
-        original_filename=filename,
+        original_filename=original_filename,
         status="uploaded",
         voice=chosen_voice,
         provider=chosen_provider,
@@ -142,8 +223,8 @@ async def create_book(
     db.commit()
     db.refresh(book)
 
-    # 4. Stream and save PDF to storage/<book_id>/original.pdf (validating max 30MB)
-    book_dir = get_book_storage_dir(book.id)
+    # 9. Stream and save PDF to storage/<book_id>/original.pdf, enforcing 30MB while streaming
+    book_dir = create_book_storage_dir(book.id)
     target_path = book_dir / "original.pdf"
     total_bytes = 0
 
@@ -152,12 +233,6 @@ async def create_book(
             while chunk := await file.read(1024 * 1024):  # Read in 1MB chunks
                 total_bytes += len(chunk)
                 if total_bytes > MAX_FILE_SIZE:
-                    buffer.close()
-                    if target_path.exists():
-                        target_path.unlink()
-                    # Clean up Book record
-                    db.delete(book)
-                    db.commit()
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
                         detail="File exceeds maximum allowed size of 30MB.",
@@ -165,17 +240,21 @@ async def create_book(
                 buffer.write(chunk)
 
         if total_bytes == 0:
-            if target_path.exists():
-                target_path.unlink()
-            db.delete(book)
-            db.commit()
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Uploaded PDF file is empty (0 bytes).",
             )
     except HTTPException:
+        if target_path.exists():
+            target_path.unlink()
+        db.delete(book)
+        db.commit()
+        if book_dir.exists():
+            shutil.rmtree(book_dir, ignore_errors=True)
         raise
     except Exception as exc:
+        if target_path.exists():
+            target_path.unlink()
         db.delete(book)
         db.commit()
         if book_dir.exists():
@@ -185,7 +264,7 @@ async def create_book(
             detail=f"Failed to save uploaded file: {str(exc)}",
         )
 
-    # 5. Launch asynchronous background processing
+    # 10. Launch asynchronous background processing
     background_tasks.add_task(process_book, book.id)
 
     return {"id": book.id, "status": book.status}
@@ -228,6 +307,7 @@ def list_books(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
             "done_chunks": b.done_chunks,
             "voice": b.voice,
             "provider": getattr(b, "provider", "edge_tts") or "edge_tts",
+            "voice_cast": getattr(b, "voice_cast", None),
             "created_at": b.created_at.isoformat() if b.created_at else None,
         }
         for b in books
@@ -273,6 +353,7 @@ def get_book_details(id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         "progress_percent": progress_percent,
         "voice": book.voice,
         "provider": getattr(book, "provider", "edge_tts") or "edge_tts",
+        "voice_cast": getattr(book, "voice_cast", None),
         "created_at": book.created_at.isoformat() if book.created_at else None,
     }
 
@@ -360,30 +441,53 @@ def retry_failed_chunks_endpoint(
 
 
 @app.get("/api/audio/{book_id}/{filename}")
-def serve_audio_chunk(book_id: str, filename: str) -> FileResponse:
+def serve_audio_chunk(
+    book_id: str,
+    filename: str,
+    db: Session = Depends(get_db),
+) -> FileResponse:
     """Serve an MP3 audio file with native HTTP Range request support."""
-    # Sanitize filename to prevent directory traversal
-    clean_filename = Path(filename).name
-    if not clean_filename.lower().endswith(".mp3"):
+    # 1. Validate that book_id is a valid UUID (return 400 if invalid)
+    try:
+        uuid.UUID(book_id)
+    except (ValueError, TypeError, AttributeError):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Invalid audio format requested. Only MP3 files are served.",
+            detail="Invalid book ID format. Must be a valid UUID.",
         )
 
-    book_dir = get_book_storage_dir(book_id)
-    audio_path = book_dir / clean_filename
-
-    if not audio_path.exists() or not audio_path.is_file():
+    # Validate that the Book exists in the database (404 if not)
+    book = db.query(Book).filter(Book.id == book_id).first()
+    if not book:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Audio file '{clean_filename}' for book '{book_id}' was not found.",
+            detail=f"Book with id '{book_id}' not found.",
+        )
+
+    # 2. Validate filename with a strict regex: ^chunk_\d{3,5}\.mp3$
+    if not CHUNK_FILENAME_REGEX.match(filename):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid audio filename format. Only MP3 files matching chunk_XXX.mp3 are served.",
+        )
+
+    # 3. Build path as STORAGE_DIR / book_id / filename, call .resolve(),
+    # and confirm it is inside STORAGE_DIR.resolve() using is_relative_to.
+    # Return 404 otherwise.
+    audio_path = (STORAGE_DIR / book_id / filename).resolve()
+    storage_resolved = STORAGE_DIR.resolve()
+
+    if not audio_path.is_relative_to(storage_resolved) or not audio_path.is_file():
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Audio file '{filename}' for book '{book_id}' was not found.",
         )
 
     # FileResponse natively handles HTTP Range headers (status 206 Partial Content)
     return FileResponse(
         path=str(audio_path),
         media_type="audio/mpeg",
-        filename=clean_filename,
+        filename=filename,
     )
 
 

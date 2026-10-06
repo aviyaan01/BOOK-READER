@@ -12,7 +12,6 @@ voices within a book's processing session (cast dict is maintained externally).
 
 from __future__ import annotations
 
-import hashlib
 import json
 import logging
 import os
@@ -259,7 +258,3 @@ def build_voice_segments(
 
     return segments
 
-
-def compute_cast_hash(text: str) -> str:
-    """Compute a short hash for caching cast annotations keyed on text."""
-    return hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
