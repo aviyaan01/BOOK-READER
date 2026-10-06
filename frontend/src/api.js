@@ -47,15 +47,17 @@ export async function fetchBookChunks(bookId) {
  * @param {File} file - PDF file (max 30MB)
  * @param {string} language - "bn" or "en"
  * @param {string} [voice] - Optional voice name
+ * @param {boolean} [improveWithAi=false] - Optional toggle to clean text using Anthropic Claude
  * @returns {Promise<{id: string, status: string}>}
  */
-export async function uploadBookPdf(file, language = 'en', voice = '') {
+export async function uploadBookPdf(file, language = 'en', voice = '', improveWithAi = false) {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('language', language);
   if (voice && voice.trim()) {
     formData.append('voice', voice.trim());
   }
+  formData.append('improve_with_ai', improveWithAi ? 'true' : 'false');
 
   const res = await fetch(`${BASE_URL}/api/books`, {
     method: 'POST',

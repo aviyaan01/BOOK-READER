@@ -84,14 +84,26 @@ export default function UploadProgressTracker({ bookId, onStatusChange, onError 
     );
   }
 
-  const { status, total_chunks = 0, done_chunks = 0, progress_percent = 0, title } = book;
+  const {
+    status,
+    total_chunks = 0,
+    done_chunks = 0,
+    progress_percent = 0,
+    title,
+    is_scanned,
+    warning_message,
+    total_characters = 0,
+    cost_warning,
+  } = book;
 
   // Format progress text as required: "Generating audio: 34%"
   let progressStatusText = '';
   if (status === 'uploaded') {
     progressStatusText = 'Storybook uploaded, preparing extractor...';
   } else if (status === 'extracting') {
-    progressStatusText = 'Extracting story text and splitting sentences...';
+    progressStatusText = is_scanned
+      ? 'Recognizing text via OCR (scanned PDF)...'
+      : 'Extracting story text and splitting sentences...';
   } else if (status === 'generating') {
     progressStatusText = `Generating audio: ${progress_percent}%`;
   } else if (status === 'ready') {
@@ -128,6 +140,58 @@ export default function UploadProgressTracker({ bookId, onStatusChange, onError 
         animation: 'fadeIn 0.3s ease',
       }}
     >
+      {/* Scanned PDF warning message */}
+      {(is_scanned || warning_message) && (
+        <div
+          className="scanned-pdf-warning"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            padding: '12px 16px',
+            marginBottom: '16px',
+            borderRadius: 'var(--radius-md)',
+            background: 'rgba(245, 158, 11, 0.12)',
+            border: '1px solid rgba(245, 158, 11, 0.4)',
+            color: '#fbbf24',
+            fontSize: '0.88rem',
+            lineHeight: 1.4,
+          }}
+        >
+          <AlertTriangle size={18} style={{ flexShrink: 0, color: '#f59e0b' }} />
+          <span>
+            {warning_message || 'This looks like a scanned PDF, text recognition may take longer and can contain errors.'}
+          </span>
+        </div>
+      )}
+
+      {/* Cost & Size Warning Banner */}
+      {(cost_warning || total_characters >= 10000) && (
+        <div
+          className="cost-size-warning"
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '10px',
+            padding: '12px 16px',
+            marginBottom: '16px',
+            borderRadius: 'var(--radius-md)',
+            background: 'rgba(245, 158, 11, 0.12)',
+            border: '1px solid rgba(245, 158, 11, 0.4)',
+            color: '#fbbf24',
+            fontSize: '0.88rem',
+            lineHeight: 1.4,
+          }}
+        >
+          <AlertTriangle size={18} style={{ flexShrink: 0, color: '#f59e0b', marginTop: '2px' }} />
+          <div>
+            <strong>Cost &amp; Size Warning:</strong>{' '}
+            {cost_warning ||
+              `Large storybook detected (${total_characters.toLocaleString()} characters, ~${Math.max(1, Math.round(total_characters / 900))} min audio). Narration synthesis and AI cleanup take more processing time and API quota.`}
+          </div>
+        </div>
+      )}
+
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '14px' }}>
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
           {isReady ? (
@@ -147,18 +211,36 @@ export default function UploadProgressTracker({ bookId, onStatusChange, onError 
           </div>
         </div>
 
-        {/* Progress ratio tag */}
-        <span
-          className="badge"
-          style={{
-            fontSize: '0.8rem',
-            padding: '4px 10px',
-            background: 'var(--bg-tertiary)',
-            color: 'var(--text-secondary)',
-          }}
-        >
-          {total_chunks > 0 ? `${done_chunks}/${total_chunks} chunks` : 'Processing'}
-        </span>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          {total_characters > 0 && (
+            <span
+              className="badge"
+              style={{
+                fontSize: '0.8rem',
+                padding: '4px 10px',
+                background: total_characters >= 10000 ? 'rgba(245, 158, 11, 0.15)' : 'var(--bg-tertiary)',
+                color: total_characters >= 10000 ? '#fbbf24' : 'var(--text-secondary)',
+                border: total_characters >= 10000 ? '1px solid rgba(245, 158, 11, 0.35)' : 'none',
+              }}
+              title={`${total_characters.toLocaleString()} total characters`}
+            >
+              {total_characters.toLocaleString()} chars
+            </span>
+          )}
+
+          {/* Progress ratio tag */}
+          <span
+            className="badge"
+            style={{
+              fontSize: '0.8rem',
+              padding: '4px 10px',
+              background: 'var(--bg-tertiary)',
+              color: 'var(--text-secondary)',
+            }}
+          >
+            {total_chunks > 0 ? `${done_chunks}/${total_chunks} chunks` : 'Processing'}
+          </span>
+        </div>
       </div>
 
       {/* Progress Bar */}

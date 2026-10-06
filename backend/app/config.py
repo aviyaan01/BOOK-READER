@@ -27,6 +27,10 @@ DEFAULT_TTS_PROVIDER: str = os.getenv("DEFAULT_TTS_PROVIDER", "edge_tts")
 DEFAULT_ENGLISH_VOICE: str = os.getenv("DEFAULT_ENGLISH_VOICE", "en-US-ChristopherNeural")
 DEFAULT_BANGLA_VOICE: str = os.getenv("DEFAULT_BANGLA_VOICE", "bn-BD-PradeepNeural")
 
+# LLM Text Cleanup (Anthropic Claude)
+ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")
+ANTHROPIC_MODEL: str = os.getenv("ANTHROPIC_MODEL", "claude-3-5-sonnet-20241022")
+
 
 def get_book_storage_dir(book_id: str) -> Path:
     """Return the dedicated storage path for a book, creating the folder if needed."""

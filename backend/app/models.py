@@ -2,7 +2,7 @@
 
 import uuid
 from datetime import datetime, timezone
-from sqlalchemy import Column, String, Integer, Float, DateTime, ForeignKey, Text
+from sqlalchemy import Column, String, Integer, Float, DateTime, ForeignKey, Text, Boolean
 from sqlalchemy.orm import relationship
 from backend.app.db import Base
 
@@ -26,9 +26,12 @@ class Book(Base):
         default="uploaded",
         nullable=False,
     )  # "uploaded", "extracting", "generating", "ready", "failed"
+    is_scanned = Column(Boolean, default=False, nullable=False)
+    improve_with_ai = Column(Boolean, default=False, nullable=False)
     error_message = Column(Text, nullable=True)
     total_chunks = Column(Integer, default=0, nullable=False)
     done_chunks = Column(Integer, default=0, nullable=False)
+    total_characters = Column(Integer, default=0, nullable=False)
     voice = Column(String(100), default="en-US-AriaNeural", nullable=False)
     created_at = Column(
         DateTime,

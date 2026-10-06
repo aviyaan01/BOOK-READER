@@ -19,6 +19,7 @@ export default function BookUploader({ onUploadSuccess, onError }) {
   const [selectedVoice, setSelectedVoice] = useState('');
   const [loadingVoices, setLoadingVoices] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
+  const [improveWithAi, setImproveWithAi] = useState(false);
   const fileInputRef = useRef(null);
 
   // Fetch available voices whenever language changes
@@ -112,10 +113,11 @@ export default function BookUploader({ onUploadSuccess, onError }) {
       setIsUploading(true);
       if (onError) onError(null);
 
-      const result = await uploadBookPdf(selectedFile, language, selectedVoice);
+      const result = await uploadBookPdf(selectedFile, language, selectedVoice, improveWithAi);
 
-      // Reset file input
+      // Reset file input and AI toggle
       setSelectedFile(null);
+      setImproveWithAi(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
 
       if (onUploadSuccess) {
@@ -288,6 +290,60 @@ export default function BookUploader({ onUploadSuccess, onError }) {
               )}
             </select>
           </div>
+        </div>
+
+        {/* Toggle: Improve text with AI (needs API key) */}
+        <div
+          style={{
+            marginTop: '18px',
+            padding: '12px 18px',
+            background: 'var(--bg-tertiary)',
+            borderRadius: 'var(--radius-md)',
+            border: '1px solid var(--card-border)',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+          }}
+        >
+          <label
+            htmlFor="improve-with-ai-checkbox"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              cursor: 'pointer',
+              userSelect: 'none',
+              fontSize: '0.9rem',
+              fontWeight: 500,
+              color: 'var(--text-primary)',
+            }}
+          >
+            <input
+              type="checkbox"
+              id="improve-with-ai-checkbox"
+              checked={improveWithAi}
+              onChange={(e) => setImproveWithAi(e.target.checked)}
+              style={{
+                width: '18px',
+                height: '18px',
+                cursor: 'pointer',
+                accentColor: 'var(--accent-primary)',
+              }}
+            />
+            <span>Improve text with AI (needs API key)</span>
+          </label>
+
+          <span
+            className="badge"
+            style={{
+              fontSize: '0.74rem',
+              color: improveWithAi ? 'var(--accent-primary)' : 'var(--text-muted)',
+              background: improveWithAi ? 'rgba(99, 102, 241, 0.15)' : 'transparent',
+              border: `1px solid ${improveWithAi ? 'rgba(99, 102, 241, 0.3)' : 'transparent'}`,
+            }}
+          >
+            Claude Restoration
+          </span>
         </div>
 
         {/* Upload Button */}

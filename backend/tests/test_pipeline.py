@@ -85,6 +85,7 @@ def test_process_book_success_and_resume():
                 assert processed_book.error_message is None
                 assert processed_book.total_chunks > 0
                 assert processed_book.done_chunks == processed_book.total_chunks
+                assert processed_book.total_characters > 0
 
                 chunks = db.query(Chunk).filter(Chunk.book_id == book_id).order_by(Chunk.index).all()
                 assert len(chunks) == processed_book.total_chunks
@@ -167,3 +168,105 @@ def test_process_bangla_book():
                 shutil.rmtree(book_dir, ignore_errors=True)
 
     asyncio.run(run())
+
+
+def test_process_book_with_llm_clean():
+    """Verify clean_text_with_llm is triggered during pipeline processing when improve_with_ai is True."""
+    async def run():
+        sample_source = Path("sample_books/english_story_whispering_tree.pdf")
+        if not sample_source.exists():
+            pytest.skip("Sample PDF not found.")
+
+        with SessionLocal() as db:
+            book = Book(
+                title="AI Cleaned Storybook",
+                language="en",
+                original_filename="english_story_whispering_tree.pdf",
+                voice="en-US-AriaNeural",
+                improve_with_ai=True,
+            )
+            db.add(book)
+            db.commit()
+            db.refresh(book)
+            book_id = book.id
+
+        book_dir = get_book_storage_dir(book_id)
+        target_pdf = book_dir / "source.pdf"
+        shutil.copyfile(sample_source, target_pdf)
+
+        try:
+            from unittest.mock import patch
+            with patch("backend.app.services.pipeline.clean_text_with_llm", side_effect=lambda txt: txt) as mock_llm_clean:
+                await process_book(book_id)
+                mock_llm_clean.assert_called_once()
+        finally:
+            with SessionLocal() as db:
+                b = db.query(Book).filter(Book.id == book_id).first()
+                if b:
+                    db.delete(b)
+                    db.commit()
+            if book_dir.exists():
+                shutil.rmtree(book_dir, ignore_errors=True)
+
+    asyncio.run(run())
+
+
+def test_process_book_stores_character_count_before_tts():
+    """Verify total_characters is calculated and stored on Book before TTS synthesis starts."""
+    async def run():
+        sample_source = Path("sample_books/english_story_whispering_tree.pdf")
+        if not sample_source.exists():
+            pytest.skip("Sample PDF not found.")
+
+        with SessionLocal() as db:
+            book = Book(
+                title="Char Count Pre-TTS Test",
+                language="en",
+                original_filename="english_story_whispering_tree.pdf",
+            )
+            db.add(book)
+            db.commit()
+            db.refresh(book)
+            book_id = book.id
+
+        book_dir = get_book_storage_dir(book_id)
+        target_pdf = book_dir / "source.pdf"
+        shutil.copyfile(sample_source, target_pdf)
+
+        captured_chars_at_tts_start = []
+
+        try:
+            from unittest.mock import patch
+
+            async def fake_synthesize(text, out_path, voice):
+                # When TTS synthesize is called, check what is in the DB
+                with SessionLocal() as check_db:
+                    b = check_db.query(Book).filter(Book.id == book_id).first()
+                    if b:
+                        captured_chars_at_tts_start.append(b.total_characters)
+                # Create small dummy mp3
+                Path(out_path).write_bytes(b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\xFF\xFB\x90\x44" * 30)
+
+            with patch("backend.app.services.tts.edge_tts_provider.EdgeTTSProvider.synthesize", side_effect=fake_synthesize):
+                await process_book(book_id)
+
+            assert len(captured_chars_at_tts_start) > 0, "TTS should have been called"
+            # Every call to synthesize saw total_characters already stored and > 0!
+            for char_count in captured_chars_at_tts_start:
+                assert char_count > 0, "Character count must be stored on Book before TTS begins"
+
+            with SessionLocal() as db:
+                final_book = db.query(Book).filter(Book.id == book_id).first()
+                assert final_book.total_characters == captured_chars_at_tts_start[0]
+
+        finally:
+            with SessionLocal() as db:
+                b = db.query(Book).filter(Book.id == book_id).first()
+                if b:
+                    db.delete(b)
+                    db.commit()
+            if book_dir.exists():
+                shutil.rmtree(book_dir, ignore_errors=True)
+
+    asyncio.run(run())
+

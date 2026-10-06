@@ -196,6 +196,7 @@ def test_book_crud_lifecycle(client):
         assert res_audio.status_code == 200
         assert res_audio.headers["content-type"] == "audio/mpeg"
         assert len(res_audio.content) == len(dummy_audio)
+        res_audio.close()
 
         # HTTP Range request (Partial Content 206)
         res_range = client.get(
@@ -205,10 +206,12 @@ def test_book_crud_lifecycle(client):
         assert res_range.status_code == 206
         assert len(res_range.content) == 10
         assert "bytes 0-9/" in res_range.headers.get("content-range", "")
+        res_range.close()
 
         # 7. DELETE /api/books/{id}
         res_del = client.delete(f"/api/books/{book_id}")
         assert res_del.status_code == 200
+        res_del.close()
 
         # Verify book and chunks deleted from DB
         with SessionLocal() as db:
@@ -216,6 +219,14 @@ def test_book_crud_lifecycle(client):
             assert db.query(Chunk).filter(Chunk.book_id == book_id).count() == 0
 
         # Verify storage folder deleted
+        import gc, time
+        gc.collect()
+        for _ in range(10):
+            if not book_dir.exists():
+                break
+            time.sleep(0.05)
+        if book_dir.exists():
+            print("REMAINING IN BOOK_DIR:", list(book_dir.iterdir()))
         assert not book_dir.exists()
 
         # Subsequent GET should return 404
@@ -227,6 +238,44 @@ def test_book_crud_lifecycle(client):
         book_dir = get_book_storage_dir(book_id)
         if book_dir.exists():
             shutil.rmtree(book_dir, ignore_errors=True)
+        with SessionLocal() as db:
+            b = db.query(Book).filter(Book.id == book_id).first()
+            if b:
+                db.delete(b)
+                db.commit()
+
+
+def test_scanned_book_warning_in_api(client):
+    """Verify that is_scanned=True returns the scanned PDF warning message in API responses."""
+    with SessionLocal() as db:
+        book = Book(
+            title="Scanned Storybook",
+            language="en",
+            original_filename="scanned.pdf",
+            is_scanned=True,
+        )
+        db.add(book)
+        db.commit()
+        db.refresh(book)
+        book_id = book.id
+
+    try:
+        res = client.get(f"/api/books/{book_id}")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["is_scanned"] is True
+        assert data["warning_message"] == (
+            "This looks like a scanned PDF, text recognition may take longer and can contain errors."
+        )
+
+        res_list = client.get("/api/books")
+        assert res_list.status_code == 200
+        item = next(b for b in res_list.json() if b["id"] == book_id)
+        assert item["is_scanned"] is True
+        assert item["warning_message"] == (
+            "This looks like a scanned PDF, text recognition may take longer and can contain errors."
+        )
+    finally:
         with SessionLocal() as db:
             b = db.query(Book).filter(Book.id == book_id).first()
             if b:
@@ -249,3 +298,85 @@ def test_not_found_endpoints(client):
     res_del = client.delete(f"/api/books/{fake_id}")
     assert res_del.status_code == 404
     assert f"Book with id '{fake_id}' not found" in res_del.json()["detail"]
+
+
+def test_upload_book_with_improve_with_ai_toggle(client):
+    """Verify that uploading with improve_with_ai=true sets the toggle flag correctly."""
+    sample_pdf_path = Path("sample_books/english_story_whispering_tree.pdf")
+    if sample_pdf_path.exists():
+        pdf_bytes = sample_pdf_path.read_bytes()
+    else:
+        pdf_bytes = b"%PDF-1.4 dummy valid pdf bytes"
+
+    with patch("backend.app.main.process_book"):
+        response = client.post(
+            "/api/books",
+            data={"language": "en", "voice": "en-US-AriaNeural", "improve_with_ai": "true"},
+            files={"file": ("ai_story.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+        )
+        assert response.status_code == 201
+        book_id = response.json()["id"]
+
+    try:
+        res = client.get(f"/api/books/{book_id}")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["improve_with_ai"] is True
+    finally:
+        client.delete(f"/api/books/{book_id}")
+
+
+def test_cost_warning_for_large_book(client):
+    """Verify that books with >= 10,000 characters receive cost/size warnings in API."""
+    with SessionLocal() as db:
+        book_normal = Book(
+            title="Short Book",
+            language="en",
+            original_filename="short.pdf",
+            total_characters=2500,
+        )
+        book_large = Book(
+            title="Large Epic Book",
+            language="en",
+            original_filename="epic.pdf",
+            total_characters=25000,
+        )
+        db.add_all([book_normal, book_large])
+        db.commit()
+        db.refresh(book_normal)
+        db.refresh(book_large)
+        id_normal = book_normal.id
+        id_large = book_large.id
+
+    try:
+        # Check normal book
+        res_normal = client.get(f"/api/books/{id_normal}")
+        assert res_normal.status_code == 200
+        normal_data = res_normal.json()
+        assert normal_data["total_characters"] == 2500
+        assert normal_data["cost_warning"] is None
+
+        # Check large book
+        res_large = client.get(f"/api/books/{id_large}")
+        assert res_large.status_code == 200
+        large_data = res_large.json()
+        assert large_data["total_characters"] == 25000
+        assert large_data["cost_warning"] is not None
+        assert "25,000 characters" in large_data["cost_warning"]
+
+        # Check list endpoint
+        res_list = client.get("/api/books")
+        assert res_list.status_code == 200
+        items = {item["id"]: item for item in res_list.json()}
+        assert items[id_normal]["total_characters"] == 2500
+        assert items[id_normal]["cost_warning"] is None
+        assert items[id_large]["total_characters"] == 25000
+        assert items[id_large]["cost_warning"] is not None
+    finally:
+        with SessionLocal() as db:
+            for bid in (id_normal, id_large):
+                b = db.query(Book).filter(Book.id == bid).first()
+                if b:
+                    db.delete(b)
+            db.commit()
+

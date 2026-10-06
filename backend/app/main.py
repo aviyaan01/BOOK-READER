@@ -28,6 +28,7 @@ from backend.app.config import (
 )
 from backend.app.db import init_db, get_db
 from backend.app.models import Book, Chunk
+from backend.app.services.pdf_extract import SCANNED_PDF_WARNING
 from backend.app.services.pipeline import process_book
 from backend.app.services.tts.edge_tts_provider import list_voices
 
@@ -77,6 +78,7 @@ async def create_book(
     file: UploadFile = File(...),
     language: str = Form(...),
     voice: Optional[str] = Form(None),
+    improve_with_ai: bool = Form(False),
     db: Session = Depends(get_db),
 ) -> Dict[str, str]:
     """Upload a storybook PDF (max 30MB), save as original.pdf, and launch background processing.
@@ -86,6 +88,7 @@ async def create_book(
         file: Multipart uploaded PDF file (max 30MB).
         language: Language code, must be 'bn' (Bangla) or 'en' (English).
         voice: Optional voice ID or name to use for speech narration.
+        improve_with_ai: Optional flag to run AI text cleanup using Anthropic Claude.
         db: SQLAlchemy transactional database session.
 
     Returns:
@@ -118,6 +121,7 @@ async def create_book(
         original_filename=filename,
         status="uploaded",
         voice=chosen_voice,
+        improve_with_ai=bool(improve_with_ai),
     )
     db.add(book)
     db.commit()
@@ -172,6 +176,19 @@ async def create_book(
     return {"id": book.id, "status": book.status}
 
 
+LARGE_BOOK_CHAR_THRESHOLD = 10000
+
+
+def get_cost_warning(total_characters: int) -> Optional[str]:
+    """Return a warning string if document character count exceeds large threshold."""
+    if total_characters >= LARGE_BOOK_CHAR_THRESHOLD:
+        return (
+            f"Large storybook ({total_characters:,} characters). Extended synthesis time "
+            "and higher processing/API usage expected."
+        )
+    return None
+
+
 @app.get("/api/books")
 def list_books(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
     """Retrieve all uploaded books ordered by creation timestamp."""
@@ -183,6 +200,13 @@ def list_books(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
             "language": b.language,
             "original_filename": b.original_filename,
             "status": b.status,
+            "is_scanned": bool(getattr(b, "is_scanned", False)),
+            "improve_with_ai": bool(getattr(b, "improve_with_ai", False)),
+            "warning_message": (
+                SCANNED_PDF_WARNING if getattr(b, "is_scanned", False) else None
+            ),
+            "total_characters": getattr(b, "total_characters", 0) or 0,
+            "cost_warning": get_cost_warning(getattr(b, "total_characters", 0) or 0),
             "error_message": b.error_message,
             "total_chunks": b.total_chunks,
             "done_chunks": b.done_chunks,
@@ -209,6 +233,7 @@ def get_book_details(id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         if book.total_chunks > 0
         else 0.0
     )
+    total_chars = getattr(book, "total_characters", 0) or 0
 
     return {
         "id": book.id,
@@ -216,6 +241,13 @@ def get_book_details(id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         "language": book.language,
         "original_filename": book.original_filename,
         "status": book.status,
+        "is_scanned": bool(getattr(book, "is_scanned", False)),
+        "improve_with_ai": bool(getattr(book, "improve_with_ai", False)),
+        "warning_message": (
+            SCANNED_PDF_WARNING if getattr(book, "is_scanned", False) else None
+        ),
+        "total_characters": total_chars,
+        "cost_warning": get_cost_warning(total_chars),
         "error_message": book.error_message,
         "total_chunks": book.total_chunks,
         "done_chunks": book.done_chunks,
@@ -294,9 +326,16 @@ def delete_book(id: str, db: Session = Depends(get_db)) -> Dict[str, str]:
         )
 
     # Remove storage folder and audio files
+    import gc
+    import time
+    gc.collect()
     book_dir = get_book_storage_dir(id)
     if book_dir.exists():
-        shutil.rmtree(book_dir, ignore_errors=True)
+        for _ in range(10):
+            shutil.rmtree(book_dir, ignore_errors=True)
+            if not book_dir.exists():
+                break
+            time.sleep(0.05)
 
     # Delete database record (cascades to chunks)
     db.delete(book)

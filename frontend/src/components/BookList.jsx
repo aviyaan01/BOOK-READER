@@ -104,6 +104,36 @@ export default function BookList({ books, onBookDeleted, loading, onError }) {
                         {isBangla ? '🇧🇩 Bangla' : '🇺🇸 English'}
                       </span>
 
+                      {book.is_scanned && (
+                        <span
+                          className="badge"
+                          style={{
+                            background: 'rgba(245, 158, 11, 0.15)',
+                            color: '#fbbf24',
+                            border: '1px solid rgba(245, 158, 11, 0.35)',
+                          }}
+                        >
+                          Scanned / OCR
+                        </span>
+                      )}
+
+                      {book.total_characters > 0 && (
+                        <span
+                          className="badge"
+                          style={{
+                            background: book.total_characters >= 10000 ? 'rgba(245, 158, 11, 0.15)' : 'var(--bg-tertiary)',
+                            color: book.total_characters >= 10000 ? '#fbbf24' : 'var(--text-secondary)',
+                            border: book.total_characters >= 10000 ? '1px solid rgba(245, 158, 11, 0.35)' : 'none',
+                          }}
+                          title={`${book.total_characters.toLocaleString()} characters`}
+                        >
+                          {book.total_characters >= 10000 && <AlertCircle size={11} style={{ marginRight: '4px', verticalAlign: 'middle', display: 'inline' }} />}
+                          {book.total_characters >= 1000
+                            ? `${(book.total_characters / 1000).toFixed(1)}k chars`
+                            : `${book.total_characters} chars`}
+                        </span>
+                      )}
+
                       {/* Status Badge */}
                       <span
                         className="badge"

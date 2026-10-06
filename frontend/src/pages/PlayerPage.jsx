@@ -154,11 +154,76 @@ export default function PlayerPage() {
               {book.voice}
             </span>
           )}
+          {book?.total_characters > 0 && (
+            <span
+              className="badge"
+              style={{
+                background: book?.total_characters >= 10000 ? 'rgba(245, 158, 11, 0.15)' : 'var(--bg-tertiary)',
+                color: book?.total_characters >= 10000 ? '#fbbf24' : 'var(--text-secondary)',
+                border: book?.total_characters >= 10000 ? '1px solid rgba(245, 158, 11, 0.35)' : 'none',
+              }}
+              title={`${book.total_characters.toLocaleString()} total characters`}
+            >
+              {book.total_characters.toLocaleString()} chars
+            </span>
+          )}
         </div>
       </div>
 
       {/* Error Message Box */}
       <ErrorMessageBox error={errorMessage} onDismiss={() => setErrorMessage(null)} />
+
+      {/* Scanned PDF Warning Banner */}
+      {(book?.is_scanned || book?.warning_message) && (
+        <div
+          className="scanned-pdf-warning"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            padding: '12px 18px',
+            marginBottom: '20px',
+            borderRadius: 'var(--radius-md)',
+            background: 'rgba(245, 158, 11, 0.12)',
+            border: '1px solid rgba(245, 158, 11, 0.4)',
+            color: '#fbbf24',
+            fontSize: '0.9rem',
+            lineHeight: 1.4,
+          }}
+        >
+          <AlertTriangle size={18} style={{ flexShrink: 0, color: '#f59e0b' }} />
+          <span>
+            {book?.warning_message || 'This looks like a scanned PDF, text recognition may take longer and can contain errors.'}
+          </span>
+        </div>
+      )}
+
+      {/* Cost & Size Warning Banner */}
+      {(book?.cost_warning || (book?.total_characters && book.total_characters >= 10000)) && (
+        <div
+          className="cost-size-warning"
+          style={{
+            display: 'flex',
+            alignItems: 'flex-start',
+            gap: '10px',
+            padding: '12px 18px',
+            marginBottom: '20px',
+            borderRadius: 'var(--radius-md)',
+            background: 'rgba(245, 158, 11, 0.12)',
+            border: '1px solid rgba(245, 158, 11, 0.4)',
+            color: '#fbbf24',
+            fontSize: '0.9rem',
+            lineHeight: 1.4,
+          }}
+        >
+          <AlertTriangle size={18} style={{ flexShrink: 0, color: '#f59e0b', marginTop: '2px' }} />
+          <div>
+            <strong>Cost &amp; Size Warning:</strong>{' '}
+            {book?.cost_warning ||
+              `Large storybook (${book?.total_characters?.toLocaleString()} characters, ~${Math.max(1, Math.round((book?.total_characters || 0) / 900))} min audio). Narration synthesis and AI cleanup take more processing time and compute quota.`}
+          </div>
+        </div>
+      )}
 
       {/* Book Title & Header Card */}
       <div
@@ -185,6 +250,11 @@ export default function PlayerPage() {
         <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '12px' }}>
           <span style={{ fontSize: '0.88rem', color: 'var(--text-secondary)' }}>
             Original file: <code>{book?.original_filename}</code>
+            {book?.total_characters > 0 && (
+              <span style={{ marginLeft: '12px' }}>
+                • <strong>{book.total_characters.toLocaleString()}</strong> characters (~{Math.max(1, Math.round(book.total_characters / 900))} min)
+              </span>
+            )}
           </span>
 
           <span

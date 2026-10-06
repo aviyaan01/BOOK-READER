@@ -11,6 +11,7 @@ from backend.app.models import Book, Chunk
 from backend.app.config import get_book_storage_dir
 from backend.app.services.pdf_extract import extract_pages
 from backend.app.services.text_clean import clean_pages, detect_language
+from backend.app.services.llm_clean import clean_text_with_llm
 from backend.app.services.chunker import chunk_text
 from backend.app.services.tts.edge_tts_provider import EdgeTTSProvider
 
@@ -50,11 +51,34 @@ async def process_book(book_id: str) -> None:
             book.error_message = None
             db.commit()
 
-            # Extract, clean, and chunk
-            pages, _ = extract_pages(str(pdf_path))
+            def on_scanned_found():
+                with SessionLocal() as s_db:
+                    b_rec = s_db.query(Book).filter(Book.id == book_id).first()
+                    if b_rec:
+                        b_rec.is_scanned = True
+                        s_db.commit()
+
+            # Extract, clean, and chunk (supporting OCR for scanned documents)
+            pages, is_scanned_flag = extract_pages(
+                str(pdf_path),
+                language=book.language or "en",
+                on_scanned_detected=on_scanned_found,
+            )
+            if is_scanned_flag:
+                book.is_scanned = True
+                db.commit()
+
             cleaned_text = clean_pages(pages)
             if not cleaned_text.strip():
                 raise ValueError("No readable narrative text found in the PDF document.")
+
+            # Optional LLM cleanup step if enabled by user
+            if getattr(book, "improve_with_ai", False):
+                cleaned_text = clean_text_with_llm(cleaned_text)
+
+            # Store total character count on Book after extraction and before TTS
+            total_chars = len(cleaned_text)
+            book.total_characters = total_chars
 
             if not book.language or book.language == "auto":
                 book.language = detect_language(cleaned_text)
@@ -80,6 +104,8 @@ async def process_book(book_id: str) -> None:
                 book.total_chunks = len(text_chunks)
             else:
                 book.total_chunks = len(existing_chunks)
+                if not book.total_characters:
+                    book.total_characters = sum(len(c.text) for c in existing_chunks)
 
             # Count any chunks that are already completed from an earlier run
             all_chunks = db.query(Chunk).filter(Chunk.book_id == book_id).order_by(Chunk.index).all()
@@ -203,6 +229,8 @@ async def process_book(book_id: str) -> None:
             if final_book:
                 final_book.total_chunks = total
                 final_book.done_chunks = done
+                if not getattr(final_book, "total_characters", 0) and total_chars:
+                    final_book.total_characters = total_chars
                 if failed == 0 and done == total and total > 0:
                     final_book.status = "ready"
                     final_book.error_message = None

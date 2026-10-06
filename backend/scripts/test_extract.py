@@ -19,13 +19,23 @@ from backend.app.services.pdf_extract import (
     extract_pages,
     CorruptedPDFError,
     EncryptedPDFError,
+    TesseractNotFoundError,
+    PDFExtractionError,
+    SCANNED_PDF_WARNING,
 )
 
 
-def run_extraction_test(pdf_path: str) -> None:
+def run_extraction_test(pdf_path: str, language: str = "en") -> None:
     """Extract pages from a target PDF file and print summary metrics."""
+    def on_progress(done: int, total: int) -> None:
+        print(f"  [OCR Progress] Processed {done}/{total} pages...")
+
     try:
-        pages, is_scanned = extract_pages(pdf_path)
+        pages, is_scanned = extract_pages(
+            pdf_path,
+            language=language,
+            progress_callback=on_progress,
+        )
     except FileNotFoundError as err:
         print(f"Error: {err}", file=sys.stderr)
         sys.exit(1)
@@ -34,6 +44,12 @@ def run_extraction_test(pdf_path: str) -> None:
         sys.exit(1)
     except CorruptedPDFError as err:
         print(f"Corrupted PDF Error: {err}", file=sys.stderr)
+        sys.exit(1)
+    except TesseractNotFoundError as err:
+        print(f"Tesseract OCR Error: {err}", file=sys.stderr)
+        sys.exit(1)
+    except PDFExtractionError as err:
+        print(f"PDF Extraction Error: {err}", file=sys.stderr)
         sys.exit(1)
     except Exception as err:
         print(f"Unexpected Error: {err}", file=sys.stderr)
@@ -44,8 +60,11 @@ def run_extraction_test(pdf_path: str) -> None:
 
     print("=" * 50)
     print(f"PDF Path: {pdf_path}")
+    print(f"Language: {language}")
     print(f"Page Count: {len(pages)}")
     print(f"Likely Scanned: {is_scanned}")
+    if is_scanned:
+        print(f"Notice: {SCANNED_PDF_WARNING}")
     print("=" * 50)
     print("First 500 Characters:")
     print("-" * 50)
@@ -56,11 +75,12 @@ def run_extraction_test(pdf_path: str) -> None:
 def main() -> None:
     """Parse command line arguments and execute the extraction test."""
     if len(sys.argv) < 2:
-        print("Usage: python backend/scripts/test_extract.py <path_to_pdf>")
+        print("Usage: python backend/scripts/test_extract.py <path_to_pdf> [language]")
         sys.exit(1)
 
     pdf_file = sys.argv[1]
-    run_extraction_test(pdf_file)
+    language = sys.argv[2] if len(sys.argv) > 2 else "en"
+    run_extraction_test(pdf_file, language=language)
 
 
 if __name__ == "__main__":
