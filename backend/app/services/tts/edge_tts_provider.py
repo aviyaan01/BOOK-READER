@@ -90,8 +90,12 @@ async def list_voices(language: Optional[str] = None) -> List[Dict[str, Any]]:
     return filtered
 
 
+import shutil
+from backend.app.services.tts.cache import get_cached_audio, save_to_cache
+
+
 class EdgeTTSProvider(TTSProvider):
-    """TTS Provider utilizing Microsoft Edge neural speech synthesis with retry backoff."""
+    """TTS Provider utilizing Microsoft Edge neural speech synthesis with retry backoff and caching."""
 
     def __init__(
         self,
@@ -101,6 +105,10 @@ class EdgeTTSProvider(TTSProvider):
         """Initialize the provider with default English and Bangla voices."""
         self.default_english_voice = default_english_voice
         self.default_bangla_voice = default_bangla_voice
+
+    @property
+    def provider_name(self) -> str:
+        return "edge_tts"
 
     async def list_voices(self, language: Optional[str] = None) -> List[Dict[str, Any]]:
         """Return available voices filtered by language code."""
@@ -113,7 +121,7 @@ class EdgeTTSProvider(TTSProvider):
         voice: Optional[str] = None,
         rate: str = "+0%",
     ) -> None:
-        """Synthesize text into speech and save audio to out_path with exponential backoff retries.
+        """Synthesize text into speech and save audio to out_path with caching and backoff retries.
 
         Args:
             text: Text to narrate.
@@ -135,6 +143,18 @@ class EdgeTTSProvider(TTSProvider):
         else:
             chosen_voice = voice
 
+        # 1. Check cache by hash(text + voice + provider)
+        cached_file = get_cached_audio(
+            text=text,
+            voice=chosen_voice,
+            provider=self.provider_name,
+        )
+        if cached_file:
+            dest_dir = Path(out_path).parent
+            dest_dir.mkdir(parents=True, exist_ok=True)
+            shutil.copyfile(cached_file, out_path)
+            return
+
         # Ensure destination directory exists
         dest_dir = Path(out_path).parent
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -150,6 +170,14 @@ class EdgeTTSProvider(TTSProvider):
                     rate=rate,
                 )
                 await communicate.save(out_path)
+
+                # Save synthesized audio to cache
+                save_to_cache(
+                    text=text,
+                    voice=chosen_voice,
+                    provider=self.provider_name,
+                    source_audio_path=out_path,
+                )
                 return
             except Exception as exc:
                 last_exception = exc
@@ -160,3 +188,4 @@ class EdgeTTSProvider(TTSProvider):
 
         if last_exception:
             raise last_exception
+

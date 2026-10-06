@@ -34,6 +34,12 @@ def init_db() -> None:
             if "total_characters" not in existing_columns:
                 conn.exec_driver_sql("ALTER TABLE books ADD COLUMN total_characters INTEGER DEFAULT 0")
                 conn.commit()
+            if "provider" not in existing_columns:
+                conn.exec_driver_sql("ALTER TABLE books ADD COLUMN provider VARCHAR(50) DEFAULT 'edge_tts'")
+                conn.commit()
+            if "multi_voice" not in existing_columns:
+                conn.exec_driver_sql("ALTER TABLE books ADD COLUMN multi_voice BOOLEAN DEFAULT 0")
+                conn.commit()
     except Exception:
         pass
 

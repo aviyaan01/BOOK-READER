@@ -6,6 +6,12 @@ from abc import ABC, abstractmethod
 class TTSProvider(ABC):
     """Abstract interface for text-to-speech engine providers."""
 
+    @property
+    @abstractmethod
+    def provider_name(self) -> str:
+        """Unique identifier name for this TTS provider."""
+        pass
+
     @abstractmethod
     async def synthesize(
         self,
@@ -23,3 +29,4 @@ class TTSProvider(ABC):
             rate: Speech rate adjustment (e.g., '+0%', '+15%', '-10%').
         """
         pass
+

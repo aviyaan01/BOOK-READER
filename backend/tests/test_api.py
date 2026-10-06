@@ -380,3 +380,247 @@ def test_cost_warning_for_large_book(client):
                     db.delete(b)
             db.commit()
 
+
+def test_retry_nonexistent_book(client):
+    """Verify POST /api/books/{id}/retry returns 404 for nonexistent book."""
+    fake_id = "00000000-0000-0000-0000-000000000000"
+    res = client.post(f"/api/books/{fake_id}/retry")
+    assert res.status_code == 404
+    assert f"Book with id '{fake_id}' not found" in res.json()["detail"]
+
+
+def test_retry_no_failed_chunks(client):
+    """Verify POST /api/books/{id}/retry returns retried_chunks=0 when all chunks are done."""
+    with SessionLocal() as db:
+        book = Book(
+            title="Complete Book",
+            language="en",
+            original_filename="complete.pdf",
+            status="ready",
+            total_chunks=2,
+            done_chunks=2,
+        )
+        db.add(book)
+        db.commit()
+        db.refresh(book)
+        book_id = book.id
+
+        chunk0 = Chunk(book_id=book_id, index=0, text="First done chunk", status="done")
+        chunk1 = Chunk(book_id=book_id, index=1, text="Second done chunk", status="done")
+        db.add_all([chunk0, chunk1])
+        db.commit()
+
+    try:
+        res = client.post(f"/api/books/{book_id}/retry")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["id"] == book_id
+        assert data["retried_chunks"] == 0
+        assert "No failed chunks to retry" in data["message"]
+    finally:
+        with SessionLocal() as db:
+            b = db.query(Book).filter(Book.id == book_id).first()
+            if b:
+                db.delete(b)
+                db.commit()
+
+
+def test_retry_failed_chunks_endpoint(client):
+    """Verify POST /api/books/{id}/retry triggers retry for only failed chunks."""
+    with SessionLocal() as db:
+        book = Book(
+            title="Partially Failed Book",
+            language="en",
+            original_filename="partial.pdf",
+            status="failed",
+            error_message="1 chunk(s) failed",
+            total_chunks=3,
+            done_chunks=2,
+        )
+        db.add(book)
+        db.commit()
+        db.refresh(book)
+        book_id = book.id
+
+        c0 = Chunk(book_id=book_id, index=0, text="Completed sentence 1", status="done", audio_path="chunk_000.mp3", duration_seconds=2.5)
+        c1 = Chunk(book_id=book_id, index=1, text="Failed sentence 2", status="failed", audio_path=None)
+        c2 = Chunk(book_id=book_id, index=2, text="Completed sentence 3", status="done", audio_path="chunk_002.mp3", duration_seconds=3.0)
+        db.add_all([c0, c1, c2])
+        db.commit()
+
+    try:
+        with patch("backend.app.main.retry_failed_chunks") as mock_retry:
+            res = client.post(f"/api/books/{book_id}/retry")
+            assert res.status_code == 200
+            data = res.json()
+            assert data["id"] == book_id
+            assert data["status"] == "generating"
+            assert data["retried_chunks"] == 1
+            assert "Queued 1 failed chunk(s)" in data["message"]
+
+        # Verify book status in database updated to generating and error cleared
+        with SessionLocal() as db:
+            updated_book = db.query(Book).filter(Book.id == book_id).first()
+            assert updated_book.status == "generating"
+            assert updated_book.error_message is None
+    finally:
+        with SessionLocal() as db:
+            b = db.query(Book).filter(Book.id == book_id).first()
+            if b:
+                db.delete(b)
+                db.commit()
+
+
+@pytest.mark.anyio
+async def test_retry_service_only_regenerates_failed_chunks():
+    """Verify that retry_failed_chunks regenerates only failed chunks and preserves done chunks."""
+    from unittest.mock import MagicMock
+    from backend.app.services.pipeline import retry_failed_chunks
+
+    with SessionLocal() as db:
+        book = Book(
+            title="Service Retry Book",
+            language="en",
+            original_filename="service.pdf",
+            status="failed",
+            error_message="1 chunk(s) failed to synthesize audio.",
+            total_chunks=3,
+            done_chunks=2,
+        )
+        db.add(book)
+        db.commit()
+        db.refresh(book)
+        book_id = book.id
+
+        c0 = Chunk(
+            book_id=book_id,
+            index=0,
+            text="Sentence zero already completed.",
+            status="done",
+            audio_path="existing_chunk_000.mp3",
+            duration_seconds=4.2,
+        )
+        c1 = Chunk(
+            book_id=book_id,
+            index=1,
+            text="Sentence one that previously failed.",
+            status="failed",
+            audio_path=None,
+            duration_seconds=None,
+        )
+        c2 = Chunk(
+            book_id=book_id,
+            index=2,
+            text="Sentence two already completed.",
+            status="done",
+            audio_path="existing_chunk_002.mp3",
+            duration_seconds=3.8,
+        )
+        db.add_all([c0, c1, c2])
+        db.commit()
+
+    synthesized_texts = []
+
+    async def fake_synthesize(text, out_path, voice):
+        synthesized_texts.append(text)
+        Path(out_path).touch()
+
+    mock_mp3_obj = MagicMock()
+    mock_mp3_obj.info.length = 5.0
+
+    try:
+        with patch("backend.app.services.tts.EdgeTTSProvider.synthesize", side_effect=fake_synthesize), \
+             patch("backend.app.services.pipeline.MP3", return_value=mock_mp3_obj):
+            retried_count = await retry_failed_chunks(book_id)
+
+        assert retried_count == 1
+        # Verify that ONLY chunk 1 text was synthesized
+        assert synthesized_texts == ["Sentence one that previously failed."]
+
+        # Verify chunks state in database
+        with SessionLocal() as db:
+            chunks_db = db.query(Chunk).filter(Chunk.book_id == book_id).order_by(Chunk.index).all()
+            assert len(chunks_db) == 3
+
+            # Chunk 0: untouched
+            assert chunks_db[0].status == "done"
+            assert chunks_db[0].audio_path == "existing_chunk_000.mp3"
+            assert chunks_db[0].duration_seconds == 4.2
+
+            # Chunk 1: now done
+            assert chunks_db[1].status == "done"
+            assert chunks_db[1].audio_path is not None
+            assert chunks_db[1].duration_seconds == 5.0
+
+            # Chunk 2: untouched
+            assert chunks_db[2].status == "done"
+            assert chunks_db[2].audio_path == "existing_chunk_002.mp3"
+            assert chunks_db[2].duration_seconds == 3.8
+
+            # Book is now ready
+            book_db = db.query(Book).filter(Book.id == book_id).first()
+            assert book_db.status == "ready"
+            assert book_db.done_chunks == 3
+            assert book_db.error_message is None
+    finally:
+        book_dir = get_book_storage_dir(book_id)
+        if book_dir.exists():
+            shutil.rmtree(book_dir, ignore_errors=True)
+        with SessionLocal() as db:
+            b = db.query(Book).filter(Book.id == book_id).first()
+            if b:
+                db.delete(b)
+                db.commit()
+
+
+def test_get_voices_with_elevenlabs_provider(client):
+    """Verify GET /api/voices?provider=elevenlabs returns ElevenLabs voices."""
+    res = client.get("/api/voices?provider=elevenlabs")
+    assert res.status_code == 200
+    voices = res.json()
+    assert isinstance(voices, list)
+    assert len(voices) > 0
+    # Check that ElevenLabs voices are present
+    voice_ids = [v.get("voice_id") or v.get("ShortName") for v in voices]
+    assert "21m00Tcm4TlvDq8ikWAM" in voice_ids  # Rachel
+
+
+def test_upload_book_with_provider_selection(client):
+    """Verify that uploading with provider='elevenlabs' sets the provider field correctly."""
+    sample_pdf_path = Path("sample_books/english_story_whispering_tree.pdf")
+    if sample_pdf_path.exists():
+        pdf_bytes = sample_pdf_path.read_bytes()
+    else:
+        pdf_bytes = b"%PDF-1.4 dummy valid pdf bytes"
+
+    with patch("backend.app.main.process_book"):
+        response = client.post(
+            "/api/books",
+            data={
+                "language": "en",
+                "voice": "21m00Tcm4TlvDq8ikWAM",
+                "provider": "elevenlabs",
+            },
+            files={"file": ("eleven_story.pdf", io.BytesIO(pdf_bytes), "application/pdf")},
+        )
+        assert response.status_code == 201
+        book_id = response.json()["id"]
+
+    try:
+        # Check single book endpoint
+        res = client.get(f"/api/books/{book_id}")
+        assert res.status_code == 200
+        data = res.json()
+        assert data["provider"] == "elevenlabs"
+        assert data["voice"] == "21m00Tcm4TlvDq8ikWAM"
+
+        # Check list endpoint
+        res_list = client.get("/api/books")
+        assert res_list.status_code == 200
+        items = {item["id"]: item for item in res_list.json()}
+        assert items[book_id]["provider"] == "elevenlabs"
+    finally:
+        client.delete(f"/api/books/{book_id}")
+
+
+

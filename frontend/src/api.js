@@ -48,16 +48,22 @@ export async function fetchBookChunks(bookId) {
  * @param {string} language - "bn" or "en"
  * @param {string} [voice] - Optional voice name
  * @param {boolean} [improveWithAi=false] - Optional toggle to clean text using Anthropic Claude
+ * @param {string} [provider='edge_tts'] - TTS provider ('edge_tts' | 'elevenlabs')
+ * @param {boolean} [multiVoice=false] - Enable per-character multi-voice narration using Claude
  * @returns {Promise<{id: string, status: string}>}
  */
-export async function uploadBookPdf(file, language = 'en', voice = '', improveWithAi = false) {
+export async function uploadBookPdf(file, language = 'en', voice = '', improveWithAi = false, provider = 'edge_tts', multiVoice = false) {
   const formData = new FormData();
   formData.append('file', file);
   formData.append('language', language);
   if (voice && voice.trim()) {
     formData.append('voice', voice.trim());
   }
+  if (provider && provider.trim()) {
+    formData.append('provider', provider.trim());
+  }
   formData.append('improve_with_ai', improveWithAi ? 'true' : 'false');
+  formData.append('multi_voice', multiVoice ? 'true' : 'false');
 
   const res = await fetch(`${BASE_URL}/api/books`, {
     method: 'POST',
@@ -86,10 +92,13 @@ export async function deleteBook(bookId) {
 }
 
 /**
- * Fetch available TTS voices optionally filtered by language ("bn" or "en").
+ * Fetch available TTS voices optionally filtered by language and provider.
  */
-export async function fetchVoices(language = null) {
-  const query = language ? `?language=${encodeURIComponent(language)}` : '';
+export async function fetchVoices(language = null, provider = null) {
+  const params = new URLSearchParams();
+  if (language) params.append('language', language);
+  if (provider) params.append('provider', provider);
+  const query = params.toString() ? `?${params.toString()}` : '';
   const res = await fetch(`${BASE_URL}/api/voices${query}`);
   if (!res.ok) {
     const errorData = await res.json().catch(() => ({}));
@@ -108,3 +117,22 @@ export function getFullAudioUrl(audioUrl) {
   }
   return `${BASE_URL}${audioUrl.startsWith('/') ? '' : '/'}${audioUrl}`;
 }
+
+/**
+ * Regenerate only failed or uncompleted chunks for a book.
+ * POST /api/books/{id}/retry
+ *
+ * @param {string} bookId - ID of the storybook
+ * @returns {Promise<{id: string, status: string, retried_chunks: number, message: string}>}
+ */
+export async function retryBook(bookId) {
+  const res = await fetch(`${BASE_URL}/api/books/${bookId}/retry`, {
+    method: 'POST',
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.detail || `Failed to retry failed chunks for book '${bookId}'`);
+  }
+  return res.json();
+}
+

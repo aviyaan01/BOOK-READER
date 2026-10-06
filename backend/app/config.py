@@ -20,12 +20,18 @@ CORS_ORIGIN: str = os.getenv("CORS_ORIGIN", "http://localhost:5173")
 # Storage & Database
 STORAGE_DIR: Path = BASE_DIR / "storage"
 STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+AUDIO_CACHE_DIR: Path = STORAGE_DIR / "audio_cache"
+AUDIO_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 DATABASE_URL: str = os.getenv("DATABASE_URL", f"sqlite:///{STORAGE_DIR / 'storyteller.db'}")
 
 # TTS Defaults
 DEFAULT_TTS_PROVIDER: str = os.getenv("DEFAULT_TTS_PROVIDER", "edge_tts")
 DEFAULT_ENGLISH_VOICE: str = os.getenv("DEFAULT_ENGLISH_VOICE", "en-US-ChristopherNeural")
 DEFAULT_BANGLA_VOICE: str = os.getenv("DEFAULT_BANGLA_VOICE", "bn-BD-PradeepNeural")
+DEFAULT_ELEVENLABS_VOICE: str = os.getenv("DEFAULT_ELEVENLABS_VOICE", "21m00Tcm4TlvDq8ikWAM")  # Rachel
+
+# ElevenLabs Settings
+ELEVENLABS_API_KEY: str | None = os.getenv("ELEVENLABS_API_KEY")
 
 # LLM Text Cleanup (Anthropic Claude)
 ANTHROPIC_API_KEY: str | None = os.getenv("ANTHROPIC_API_KEY")

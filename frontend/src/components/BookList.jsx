@@ -1,7 +1,7 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { BookOpen, Headphones, Trash2, ArrowRight, Clock, FileText, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
-import { deleteBook } from '../api';
+import { BookOpen, Headphones, Trash2, ArrowRight, Clock, FileText, CheckCircle2, AlertCircle, Loader2, RotateCcw } from 'lucide-react';
+import { deleteBook, retryBook } from '../api';
 
 /**
  * List of previously uploaded storybooks with status and progress bars.
@@ -9,11 +9,26 @@ import { deleteBook } from '../api';
  * @param {Object} props
  * @param {Array} props.books - List of books from GET /api/books.
  * @param {function} props.onBookDeleted - Callback(bookId) when a book is deleted.
+ * @param {function} [props.onBookUpdated] - Callback(bookId) when a book narration is retried.
  * @param {boolean} props.loading - Loading state flag.
  * @param {function} props.onError - Error reporter callback.
  */
-export default function BookList({ books, onBookDeleted, loading, onError }) {
+export default function BookList({ books, onBookDeleted, onBookUpdated, loading, onError }) {
   const navigate = useNavigate();
+  const [retryingId, setRetryingId] = useState(null);
+
+  const handleRetry = async (e, bookId) => {
+    e.stopPropagation();
+    try {
+      setRetryingId(bookId);
+      await retryBook(bookId);
+      if (onBookUpdated) onBookUpdated(bookId);
+    } catch (err) {
+      if (onError) onError(err.message || 'Failed to retry failed chunks');
+    } finally {
+      setRetryingId(null);
+    }
+  };
 
   const handleDelete = async (e, bookId, bookTitle) => {
     e.stopPropagation();
@@ -104,6 +119,36 @@ export default function BookList({ books, onBookDeleted, loading, onError }) {
                         {isBangla ? '🇧🇩 Bangla' : '🇺🇸 English'}
                       </span>
 
+                      {book.provider && (
+                        <span
+                          className="badge"
+                          style={{
+                            background: book.provider === 'elevenlabs' ? 'rgba(236, 72, 153, 0.15)' : 'rgba(59, 130, 246, 0.15)',
+                            color: book.provider === 'elevenlabs' ? '#f472b6' : '#60a5fa',
+                            border: `1px solid ${
+                              book.provider === 'elevenlabs' ? 'rgba(236, 72, 153, 0.3)' : 'rgba(59, 130, 246, 0.3)'
+                            }`,
+                            fontSize: '0.74rem',
+                          }}
+                        >
+                          {book.provider === 'elevenlabs' ? 'ElevenLabs' : 'Edge TTS'}
+                        </span>
+                      )}
+
+                      {book.multi_voice && (
+                        <span
+                          className="badge"
+                          style={{
+                            background: 'rgba(16, 185, 129, 0.15)',
+                            color: '#34d399',
+                            border: '1px solid rgba(16, 185, 129, 0.3)',
+                            fontSize: '0.74rem',
+                          }}
+                        >
+                          🎭 Cast Mode
+                        </span>
+                      )}
+
                       {book.is_scanned && (
                         <span
                           className="badge"
@@ -179,6 +224,30 @@ export default function BookList({ books, onBookDeleted, loading, onError }) {
                     {doneChunks}/{totalChunks} chunks ({isReady ? '100%' : `${progressPercent}%`})
                   </span>
                 </div>
+
+                {book.cost_warning && (
+                  <div
+                    style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      padding: '6px 10px',
+                      marginTop: '10px',
+                      borderRadius: 'var(--radius-sm)',
+                      background: 'rgba(245, 158, 11, 0.1)',
+                      border: '1px solid rgba(245, 158, 11, 0.3)',
+                      color: '#fbbf24',
+                      fontSize: '0.78rem',
+                      lineHeight: 1.3,
+                    }}
+                    title={book.cost_warning}
+                  >
+                    <AlertCircle size={13} style={{ flexShrink: 0, color: '#f59e0b' }} />
+                    <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                      {book.cost_warning}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* Action Buttons */}
@@ -196,6 +265,34 @@ export default function BookList({ books, onBookDeleted, loading, onError }) {
                   Listen & Read
                   <ArrowRight size={14} />
                 </button>
+
+                {(isFailed || (totalChunks > 0 && doneChunks < totalChunks && !isGenerating)) && (
+                  <button
+                    type="button"
+                    className="btn btn-secondary book-retry-btn"
+                    style={{
+                      padding: '8px 12px',
+                      fontSize: '0.82rem',
+                      fontWeight: 600,
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      color: '#f87171',
+                      borderColor: 'rgba(239, 68, 68, 0.4)',
+                      background: 'rgba(239, 68, 68, 0.1)',
+                    }}
+                    disabled={retryingId === book.id}
+                    onClick={(e) => handleRetry(e, book.id)}
+                    title="Retry failed chunks"
+                  >
+                    {retryingId === book.id ? (
+                      <Loader2 size={14} style={{ animation: 'spin 1s linear infinite' }} />
+                    ) : (
+                      <RotateCcw size={14} />
+                    )}
+                    Retry
+                  </button>
+                )}
 
                 <button
                   type="button"

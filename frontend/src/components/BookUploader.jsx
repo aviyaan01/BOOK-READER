@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { UploadCloud, FileText, Loader2, Sparkles, CheckCircle, Volume2, Globe } from 'lucide-react';
+import { UploadCloud, FileText, Loader2, Sparkles, CheckCircle, Volume2, Globe, Cpu, Users } from 'lucide-react';
 import { uploadBookPdf, fetchVoices } from '../api';
 
 const MAX_FILE_SIZE_BYTES = 30 * 1024 * 1024; // 30 MB
@@ -14,38 +14,48 @@ const MAX_FILE_SIZE_BYTES = 30 * 1024 * 1024; // 30 MB
 export default function BookUploader({ onUploadSuccess, onError }) {
   const [isDragging, setIsDragging] = useState(false);
   const [selectedFile, setSelectedFile] = useState(null);
+  const [provider, setProvider] = useState('edge_tts'); // 'edge_tts' | 'elevenlabs'
   const [language, setLanguage] = useState('bn'); // 'bn' | 'en'
   const [voices, setVoices] = useState([]);
   const [selectedVoice, setSelectedVoice] = useState('');
   const [loadingVoices, setLoadingVoices] = useState(false);
   const [isUploading, setIsUploading] = useState(false);
   const [improveWithAi, setImproveWithAi] = useState(false);
+  const [multiVoice, setMultiVoice] = useState(false);
   const fileInputRef = useRef(null);
 
-  // Fetch available voices whenever language changes
+  // Fetch available voices whenever language or provider changes
   useEffect(() => {
     let isCancelled = false;
-    async function loadVoicesForLanguage() {
+    async function loadVoicesForProviderAndLanguage() {
       try {
         setLoadingVoices(true);
-        const data = await fetchVoices(language);
+        const data = await fetchVoices(language, provider);
         if (isCancelled) return;
         setVoices(data || []);
 
-        // Pick recommended voice for selected language
+        // Pick recommended voice for selected provider and language
         if (data && data.length > 0) {
-          const defaultVoice = language === 'bn'
-            ? data.find((v) => v.ShortName === 'bn-BD-NabanitaNeural' || v.name === 'bn-BD-NabanitaNeural') || data[0]
-            : data.find((v) => v.ShortName === 'en-US-AriaNeural' || v.name === 'en-US-AriaNeural') || data[0];
-          setSelectedVoice(defaultVoice.ShortName || defaultVoice.name || '');
+          let defaultVoice;
+          if (provider === 'elevenlabs') {
+            defaultVoice =
+              data.find((v) => v.name === 'Rachel' || v.ShortName === '21m00Tcm4TlvDq8ikWAM') ||
+              data[0];
+          } else {
+            defaultVoice = language === 'bn'
+              ? data.find((v) => v.ShortName === 'bn-BD-NabanitaNeural' || v.name === 'bn-BD-NabanitaNeural') || data[0]
+              : data.find((v) => v.ShortName === 'en-US-AriaNeural' || v.name === 'en-US-AriaNeural') || data[0];
+          }
+          setSelectedVoice(defaultVoice.ShortName || defaultVoice.name || defaultVoice.voice_id || '');
         } else {
           setSelectedVoice('');
         }
       } catch (err) {
         if (!isCancelled) {
           console.warn('Could not load voices:', err);
-          // Fallback voices
-          if (language === 'bn') {
+          if (provider === 'elevenlabs') {
+            setSelectedVoice('21m00Tcm4TlvDq8ikWAM');
+          } else if (language === 'bn') {
             setSelectedVoice('bn-BD-NabanitaNeural');
           } else {
             setSelectedVoice('en-US-AriaNeural');
@@ -56,11 +66,11 @@ export default function BookUploader({ onUploadSuccess, onError }) {
       }
     }
 
-    loadVoicesForLanguage();
+    loadVoicesForProviderAndLanguage();
     return () => {
       isCancelled = true;
     };
-  }, [language]);
+  }, [language, provider]);
 
   const handleDragOver = (e) => {
     e.preventDefault();
@@ -113,11 +123,12 @@ export default function BookUploader({ onUploadSuccess, onError }) {
       setIsUploading(true);
       if (onError) onError(null);
 
-      const result = await uploadBookPdf(selectedFile, language, selectedVoice, improveWithAi);
+      const result = await uploadBookPdf(selectedFile, language, selectedVoice, improveWithAi, provider, multiVoice);
 
-      // Reset file input and AI toggle
+      // Reset file input, AI toggle, and multi-voice
       setSelectedFile(null);
       setImproveWithAi(false);
+      setMultiVoice(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
 
       if (onUploadSuccess) {
@@ -208,15 +219,44 @@ export default function BookUploader({ onUploadSuccess, onError }) {
           </p>
         </div>
 
-        {/* Form Controls: Language & Voice */}
+        {/* Form Controls: Provider, Language & Voice */}
         <div
           style={{
             display: 'grid',
-            gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
             gap: '16px',
             marginTop: '22px',
           }}
         >
+          {/* TTS Engine / Provider Selector */}
+          <div>
+            <label
+              htmlFor="provider-select"
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: '6px',
+                fontSize: '0.8rem',
+                fontWeight: 600,
+                color: 'var(--text-secondary)',
+                marginBottom: '6px',
+              }}
+            >
+              <Cpu size={14} style={{ color: 'var(--accent-primary)' }} />
+              Voice Engine
+            </label>
+            <select
+              id="provider-select"
+              className="select-input"
+              value={provider}
+              onChange={(e) => setProvider(e.target.value)}
+              style={{ width: '100%', height: '42px' }}
+            >
+              <option value="edge_tts">Microsoft Edge TTS (Free)</option>
+              <option value="elevenlabs">ElevenLabs (AI Storyteller)</option>
+            </select>
+          </div>
+
           {/* Language Selector */}
           <div>
             <label
@@ -343,6 +383,70 @@ export default function BookUploader({ onUploadSuccess, onError }) {
             }}
           >
             Claude Restoration
+          </span>
+        </div>
+
+        {/* Toggle: Multi-Voice Narration */}
+        <div
+          style={{
+            marginTop: '10px',
+            padding: '12px 18px',
+            background: multiVoice ? 'rgba(16, 185, 129, 0.05)' : 'var(--bg-tertiary)',
+            borderRadius: 'var(--radius-md)',
+            border: `1px solid ${multiVoice ? 'rgba(16, 185, 129, 0.3)' : 'var(--card-border)'}`,
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            transition: 'all 0.2s ease',
+          }}
+        >
+          <label
+            htmlFor="multi-voice-checkbox"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px',
+              cursor: 'pointer',
+              userSelect: 'none',
+              fontSize: '0.9rem',
+              fontWeight: 500,
+              color: 'var(--text-primary)',
+            }}
+          >
+            <input
+              type="checkbox"
+              id="multi-voice-checkbox"
+              checked={multiVoice}
+              onChange={(e) => setMultiVoice(e.target.checked)}
+              style={{
+                width: '18px',
+                height: '18px',
+                cursor: 'pointer',
+                accentColor: '#10b981',
+              }}
+            />
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                <Users size={14} style={{ color: multiVoice ? '#10b981' : 'var(--text-muted)' }} />
+                <span>Multi-Voice Narration</span>
+              </div>
+              <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginTop: '2px' }}>
+                Claude tags characters — each gets a unique voice
+              </div>
+            </div>
+          </label>
+
+          <span
+            className="badge"
+            style={{
+              fontSize: '0.74rem',
+              color: multiVoice ? '#10b981' : 'var(--text-muted)',
+              background: multiVoice ? 'rgba(16, 185, 129, 0.15)' : 'transparent',
+              border: `1px solid ${multiVoice ? 'rgba(16, 185, 129, 0.3)' : 'transparent'}`,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            Cast Mode
           </span>
         </div>
 

@@ -13,7 +13,12 @@ from backend.app.services.pdf_extract import extract_pages
 from backend.app.services.text_clean import clean_pages, detect_language
 from backend.app.services.llm_clean import clean_text_with_llm
 from backend.app.services.chunker import chunk_text
-from backend.app.services.tts.edge_tts_provider import EdgeTTSProvider
+from backend.app.services.tts import get_tts_provider
+from backend.app.services.voice_cast import (
+    build_voice_segments,
+    get_voice_pool,
+)
+from backend.app.services.tts.multivoice import synthesize_multivoice_chunk
 
 
 async def process_book(book_id: str) -> None:
@@ -82,6 +87,7 @@ async def process_book(book_id: str) -> None:
 
             if not book.language or book.language == "auto":
                 book.language = detect_language(cleaned_text)
+            db.commit()
 
             text_chunks = chunk_text(cleaned_text, max_chars=1000)
             if not text_chunks:
@@ -100,12 +106,13 @@ async def process_book(book_id: str) -> None:
                         duration_seconds=None,
                     )
                     db.add(chunk)
-                db.commit()
                 book.total_chunks = len(text_chunks)
+                db.commit()
             else:
                 book.total_chunks = len(existing_chunks)
                 if not book.total_characters:
                     book.total_characters = sum(len(c.text) for c in existing_chunks)
+                db.commit()
 
             # Count any chunks that are already completed from an earlier run
             all_chunks = db.query(Chunk).filter(Chunk.book_id == book_id).order_by(Chunk.index).all()
@@ -126,12 +133,24 @@ async def process_book(book_id: str) -> None:
             ]
             voice = book.voice
             language = book.language
+            provider_name = book.provider
+            use_multi_voice = bool(getattr(book, "multi_voice", False))
 
         # TTS Provider setup
-        tts_provider = EdgeTTSProvider()
-        chosen_voice = voice or (
-            tts_provider.default_bangla_voice if language == "bn" else tts_provider.default_english_voice
-        )
+        tts_provider = get_tts_provider(provider_name)
+        if getattr(tts_provider, "provider_name", "") == "elevenlabs":
+            chosen_voice = tts_provider.resolve_voice(voice)
+        else:
+            chosen_voice = voice or (
+                getattr(tts_provider, "default_bangla_voice", "bn-BD-NabanitaNeural")
+                if language == "bn"
+                else getattr(tts_provider, "default_english_voice", "en-US-AriaNeural")
+            )
+
+        # Multi-voice: shared cast dict and voice pool for deterministic assignment
+        cast: dict = {}
+        voice_pool = get_voice_pool(language)
+        narrator_voice = chosen_voice  # narrator always gets the user's selected voice
 
         semaphore = asyncio.Semaphore(3)
         db_lock = asyncio.Lock()
@@ -176,11 +195,25 @@ async def process_book(book_id: str) -> None:
             # 2. Concurrency controlled by semaphore
             async with semaphore:
                 try:
-                    await tts_provider.synthesize(
-                        text=chunk_text_content,
-                        out_path=out_path,
-                        voice=chosen_voice,
-                    )
+                    if use_multi_voice:
+                        # Multi-voice path: tag sentences with Claude, synthesize per speaker
+                        segments = build_voice_segments(
+                            text=chunk_text_content,
+                            cast=cast,
+                            voice_pool=voice_pool,
+                            narrator_voice=narrator_voice,
+                        )
+                        await synthesize_multivoice_chunk(
+                            segments=segments,
+                            tts_provider=tts_provider,
+                            out_path=out_path,
+                        )
+                    else:
+                        await tts_provider.synthesize(
+                            text=chunk_text_content,
+                            out_path=out_path,
+                            voice=chosen_voice,
+                        )
 
                     # 4. Get MP3 duration using mutagen
                     audio_info = MP3(out_path)
@@ -247,3 +280,138 @@ async def process_book(book_id: str) -> None:
                 err_book.status = "failed"
                 err_book.error_message = str(exc)
                 err_db.commit()
+
+
+async def retry_failed_chunks(book_id: str) -> int:
+    """Regenerate only failed or uncompleted chunks for a book without repeating PDF extraction.
+
+    Args:
+        book_id: UUID string of the book.
+
+    Returns:
+        Number of chunks submitted for regeneration.
+    """
+    try:
+        with SessionLocal() as db:
+            book = db.query(Book).filter(Book.id == book_id).first()
+            if not book:
+                raise ValueError(f"Book with id '{book_id}' does not exist.")
+
+            book_dir = get_book_storage_dir(book_id)
+
+            # Find failed or uncompleted chunks (never regenerate chunks that are already done)
+            failed_chunks = db.query(Chunk).filter(
+                Chunk.book_id == book_id,
+                Chunk.status != "done",
+            ).order_by(Chunk.index).all()
+
+            if not failed_chunks:
+                # All chunks are done; mark book ready if needed
+                all_chunks = db.query(Chunk).filter(Chunk.book_id == book_id).all()
+                if all_chunks and all(c.status == "done" for c in all_chunks):
+                    book.status = "ready"
+                    book.error_message = None
+                    db.commit()
+                return 0
+
+            # Reset status of targeted chunks to pending
+            for c in failed_chunks:
+                c.status = "pending"
+                c.audio_path = None
+                c.duration_seconds = None
+
+            book.status = "generating"
+            book.error_message = None
+            db.commit()
+
+            chunk_data_list = [
+                (c.id, c.index, c.text)
+                for c in failed_chunks
+            ]
+            voice = book.voice
+            language = book.language
+            provider_name = book.provider
+
+        tts_provider = get_tts_provider(provider_name)
+        if getattr(tts_provider, "provider_name", "") == "elevenlabs":
+            chosen_voice = tts_provider.resolve_voice(voice)
+        else:
+            chosen_voice = voice or (
+                getattr(tts_provider, "default_bangla_voice", "bn-BD-NabanitaNeural")
+                if language == "bn"
+                else getattr(tts_provider, "default_english_voice", "en-US-AriaNeural")
+            )
+
+        semaphore = asyncio.Semaphore(3)
+        db_lock = asyncio.Lock()
+
+        async def retry_single_chunk(chunk_id: str, chunk_index: int, chunk_text: str) -> None:
+            out_file = book_dir / f"chunk_{chunk_index:03d}.mp3"
+            out_path = str(out_file)
+
+            async with semaphore:
+                try:
+                    await tts_provider.synthesize(
+                        text=chunk_text,
+                        out_path=out_path,
+                        voice=chosen_voice,
+                    )
+                    audio_info = MP3(out_path)
+                    duration = round(audio_info.info.length, 2)
+
+                    async with db_lock:
+                        with SessionLocal() as s_db:
+                            c_rec = s_db.query(Chunk).filter(Chunk.id == chunk_id).first()
+                            b_rec = s_db.query(Book).filter(Book.id == book_id).first()
+                            if c_rec:
+                                c_rec.status = "done"
+                                c_rec.audio_path = out_path
+                                c_rec.duration_seconds = duration
+                            if b_rec:
+                                b_rec.done_chunks = s_db.query(Chunk).filter(
+                                    Chunk.book_id == book_id, Chunk.status == "done"
+                                ).count()
+                            s_db.commit()
+                except Exception:
+                    async with db_lock:
+                        with SessionLocal() as s_db:
+                            c_rec = s_db.query(Chunk).filter(Chunk.id == chunk_id).first()
+                            if c_rec:
+                                c_rec.status = "failed"
+                            s_db.commit()
+
+        tasks = [
+            retry_single_chunk(cid, cidx, ctxt)
+            for cid, cidx, ctxt in chunk_data_list
+        ]
+        await asyncio.gather(*tasks)
+
+        # Final status evaluation
+        with SessionLocal() as final_db:
+            final_book = final_db.query(Book).filter(Book.id == book_id).first()
+            final_chunks = final_db.query(Chunk).filter(Chunk.book_id == book_id).all()
+            total = len(final_chunks)
+            done = sum(1 for c in final_chunks if c.status == "done")
+            failed = sum(1 for c in final_chunks if c.status == "failed")
+
+            if final_book:
+                final_book.total_chunks = total
+                final_book.done_chunks = done
+                if failed == 0 and done == total and total > 0:
+                    final_book.status = "ready"
+                    final_book.error_message = None
+                else:
+                    final_book.status = "failed"
+                    final_book.error_message = f"{failed} chunk(s) failed to synthesize audio."
+                final_db.commit()
+
+        return len(chunk_data_list)
+
+    except Exception as exc:
+        with SessionLocal() as err_db:
+            err_book = err_db.query(Book).filter(Book.id == book_id).first()
+            if err_book:
+                err_book.status = "failed"
+                err_book.error_message = str(exc)
+                err_db.commit()
+        return 0

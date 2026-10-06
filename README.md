@@ -1,199 +1,278 @@
 # PDF Storyteller 📖🎙️
 
-A web application where users can upload storybook PDFs in **English** or **Bangla (বাংলা)** and listen to natural, expressive storytelling voice narrations with real-time text sync and karaoke highlighting.
+An expressive, full-stack storybook reader that converts **English** and **Bangla (বাংলা)** PDF storybooks into narrated audiobooks with real-time text synchronization, multi-provider neural text-to-speech, AI-powered text restoration, and multi-voice character casting.
 
 ---
 
-## ✨ Features
+## 🌟 Key Features
 
-- **Multilingual Support**:
-  - **English**: Sentence splitting on punctuation (`.`, `?`, `!`) with storyteller voices (Christopher, Jenny, Guy, Aria, Sonia).
-  - **Bangla (বাংলা)**: Sentence splitting respecting Bengali Dari (`।`), double Dari (`॥`), `?`, and `!` with authentic Bengali voices (`Pradeep`, `Nabanita`, `Bashkar`, `Tanishaa`).
-- **Scanned PDF OCR Support**:
-  - Automatic detection of scanned or image-based PDFs (documents with sparse/empty native text layers).
-  - High-fidelity page rendering to images with PyMuPDF at **200 DPI**.
-  - Multi-threaded OCR recognition via `pytesseract` (`ben+eng` for Bangla, `eng` for English).
-  - Helpful user notification banner: *"This looks like a scanned PDF, text recognition may take longer and can contain errors."*
-- **Optional AI Text Restoration (Anthropic Claude)**:
-  - Toggle checkbox during upload: *"Improve text with AI (needs API key)"* (defaults to off).
-  - Cleanly segments book text into ~3,000 character chunks respecting paragraph/line boundaries.
-  - Restores broken words, OCR artifacts, and hyphenations using Claude while strictly preserving story content.
-  - Safeguarded by strict 90%–110% length boundary validation; falls back to original text if exceeded.
-  - Fast SHA-256 segment caching to disk (`backend/storage/cache/llm_clean/`) avoids duplicate API calls.
-- **Cost & Size Warning and Character Tracking**:
-  - Automatically calculates and stores total character count on the `Book` record immediately after extraction (and optional AI cleaning) and before TTS synthesis begins.
-  - Displays document size in characters and estimated narration length (~900 chars/min) across the library, progress tracker, and audiobook player.
-  - Proactively triggers a cost & size warning banner for large storybooks (>= 10,000 characters) to set expectations for processing time and API quota usage.
-- **Extensible TTS Architecture**:
-  - `TTSProvider` abstract base class with pluggable `EdgeTTSProvider` by default.
-  - Can easily register OpenAI TTS, ElevenLabs, Google TTS, etc.
-- **Dedicated Audio Storage**:
-  - Audio files are stored strictly at: `backend/storage/<book_id>/chunk_XXX.mp3`.
-- **Interactive Storybook Reader**:
-  - Page-by-page narrative view with paragraph & sentence cards.
-  - Click any sentence to play audio or synthesize on demand.
-  - **"Narrate Entire Book"** batch synthesis with live progress.
-  - Dynamic equalizer waveform indicator on active sentence.
-  - Sticky bottom audio player dock with auto-advance, playback speed controls (`0.75x` to `2.0x`), volume, scrubber, and sentence preview.
-- **Reading Themes**:
-  - 🌙 **Midnight Dark**: Deep slate library theme with glowing indigo accents.
-  - 📜 **Warm Sepia**: Classic book paper reading mode.
-  - ☀️ **Clean Light**: Crisp editorial theme.
+- **Multilingual Narration**:
+  - **English**: Sentence splitting on punctuation (`.`, `?`, `!`) with neural voices (Christopher, Aria, Jenny, Guy, Sonia).
+  - **Bangla (বাংলা)**: Sentence splitting respecting Bengali Dari (`।`), double Dari (`॥`), `?`, and `!`, with authentic Bengali voices (`Pradeep`, `Nabanita`, `Bashkar`, `Tanishaa`).
+- **Dual TTS Provider Engine**:
+  - **Microsoft Edge TTS (`edge_tts`)**: Free, high-quality neural voices with zero API key requirement, built-in retry backoff, and caching.
+  - **ElevenLabs (`elevenlabs`)**: Ultra-expressive storytelling voices (Rachel, Adam, Antoni, Bella, Josh, Domi, Elli) via ElevenLabs REST API with automatic fallback and catalog queries.
+- **Deduplicated Audio Caching**:
+  - All synthesized chunks and segments are hashed using SHA-256 over `(text + voice + provider)`.
+  - Cached files are persisted in `backend/storage/audio_cache/` so identical text segments are never synthesized twice.
+- **Multi-Voice Character Narration**:
+  - Character dialogue and narrator passages are tagged sentence-by-sentence via the Anthropic Claude API.
+  - Deterministically maps characters to distinct voices from a language voice pool.
+  - Slices and synthesizes per-speaker audio segments and concatenates them into seamless chapter audio using `pydub`.
+- **Scanned PDF OCR Engine**:
+  - Automatically identifies scanned or image-only PDFs with sparse native text layers.
+  - Renders pages to 200 DPI images with PyMuPDF and runs parallel OCR via `pytesseract` (`ben+eng` for Bangla, `eng` for English).
+  - Flags documents with a UI indicator and allows downstream AI restoration.
+- **AI Text Cleanup (Anthropic Claude)**:
+  - Fixes OCR artifacts, broken hyphenations, and scan noise.
+  - Enforces strict 90%–110% output length boundaries to prevent content drift or summarization.
+  - Caches cleaned segments by text hash in `backend/storage/.cache/`.
+- **Granular Retry Engine**:
+  - Endpoint `POST /api/books/{id}/retry` regenerates only failed or uncompleted chunks without reprocessing previously completed audio or re-extracting PDF pages.
+  - Interactive "Retry Failed Chunks" action in both the library list and reader player.
+- **Rich Audio Player & Reader**:
+  - Sentence-by-sentence read-along with active sentence highlighting and auto-scroll.
+  - Audio speed control (`0.75x`, `1.0x`, `1.25x`, `1.5x`, `2.0x`).
+  - Next-chunk preloading for gapless listening.
+  - Auto-resume and position persistence in `localStorage`.
+  - System Media Session API integration for lock-screen, headphone, and notification controls.
+  - Reading themes: **Midnight Dark**, **Warm Sepia**, and **Clean Light**.
 
 ---
 
-## 🛠️ Stack
+## 🏗️ Architecture & Technology Stack
 
-- **Backend**: Python 3.11+, FastAPI, SQLite (SQLAlchemy), PyMuPDF (`pymupdf`), `pytesseract`, `Pillow`, `edge-tts`, `python-dotenv`.
-- **Frontend**: React + Vite, Vanilla CSS with custom design system, `lucide-react`.
-
----
-
-## 🔍 Tesseract OCR Installation (Scanned PDFs)
-
-When a scanned or image-based PDF storybook is uploaded, the backend renders pages at 200 DPI and performs text recognition using Tesseract OCR. Follow the steps below for your operating system to install Tesseract and the Bangla language data:
-
-### 🪟 Windows
-
-1. **Install Tesseract OCR Engine**:
-   - **Via Windows Package Manager (recommended)**:
-     ```powershell
-     winget install UB-Mannheim.TesseractOCR
-     ```
-   - **Or via Installer Executable**:
-     Download the 64-bit installer from the UB-Mannheim repository:
-     [https://github.com/UB-Mannheim/tesseract/wiki](https://github.com/UB-Mannheim/tesseract/wiki)
-     Run the `.exe` installer. In the installer wizard, under **"Additional language data (download)"**, check **"Bengali"** to automatically install Bangla data.
-
-2. **Install Bangla Language Data (`ben.traineddata`) manually (if not selected during install)**:
-   - Download `ben.traineddata` from the official Tesseract tessdata repository:
-     [https://github.com/tesseract-ocr/tessdata_fast/raw/main/ben.traineddata](https://github.com/tesseract-ocr/tessdata_fast/raw/main/ben.traineddata)
-   - Copy the downloaded `ben.traineddata` file into your Tesseract `tessdata` folder, typically:
-     ```
-     C:\Program Files\Tesseract-OCR\tessdata\ben.traineddata
-     ```
-
-3. **Configure Environment / PATH**:
-   - Ensure `C:\Program Files\Tesseract-OCR` is added to your system `PATH`, **or** set the path in `backend/.env`:
-     ```env
-     TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
-     ```
+| Component | Technologies & Libraries |
+|---|---|
+| **Backend** | Python 3.11+, FastAPI, Uvicorn, SQLAlchemy, SQLite, PyMuPDF (`pymupdf`), `pytesseract`, `pillow`, `edge-tts`, `httpx`, `mutagen`, `anthropic`, `pydub`, `python-multipart`, `pytest` |
+| **Frontend** | React 18, Vite, React Router 6, Vanilla CSS design system, `lucide-react` |
+| **System Dependencies** | Tesseract OCR (with `ben` & `eng` traineddata), FFmpeg (for `pydub` audio processing) |
 
 ---
 
-### 🍎 macOS
+## 📋 Prerequisites
 
-1. **Install Tesseract via Homebrew**:
-   ```bash
-   brew install tesseract
+Before setting up the project, ensure you have the following installed on your system:
+
+1. **Python**: Version **3.11 or higher** ([python.org](https://www.python.org/downloads/))
+2. **Node.js**: Version **18 or higher** and `npm` ([nodejs.org](https://nodejs.org/))
+3. **Tesseract OCR**: Required for scanned PDF text recognition.
+4. **FFmpeg** *(Optional but recommended)*: Required by `pydub` for audio concatenation in multi-voice mode.
+
+---
+
+## ⚙️ System Dependencies Setup
+
+### 1. Tesseract OCR Installation
+
+#### 🪟 Windows:
+1. Install Tesseract using `winget`:
+   ```powershell
+   winget install UB-Mannheim.TesseractOCR
+   ```
+   *(Or download the installer from [UB-Mannheim/tesseract](https://github.com/UB-Mannheim/tesseract/wiki). Ensure "Bengali" is checked under Additional language data).*
+2. Verify or manually download `ben.traineddata`:
+   - Download: [tessdata_fast/ben.traineddata](https://github.com/tesseract-ocr/tessdata_fast/raw/main/ben.traineddata)
+   - Place into: `C:\Program Files\Tesseract-OCR\tessdata\ben.traineddata`
+3. Ensure `C:\Program Files\Tesseract-OCR` is in your system `PATH`, or set `TESSERACT_CMD` in `backend/.env`:
+   ```env
+   TESSERACT_CMD=C:\Program Files\Tesseract-OCR\tesseract.exe
    ```
 
-2. **Install Bangla Language Data**:
-   ```bash
-   brew install tesseract-lang
-   ```
-   *Alternatively*, download `ben.traineddata` directly into Homebrew's `tessdata` folder:
-   - Apple Silicon (M1/M2/M3/M4):
-     ```bash
-     curl -L -o /opt/homebrew/share/tessdata/ben.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/ben.traineddata
-     ```
-   - Intel Macs:
-     ```bash
-     curl -L -o /usr/local/share/tessdata/ben.traineddata https://github.com/tesseract-ocr/tessdata_fast/raw/main/ben.traineddata
-     ```
+#### 🍎 macOS:
+```bash
+brew install tesseract tesseract-lang
+```
 
----
+#### 🐧 Linux (Ubuntu / Debian):
+```bash
+sudo apt-get update
+sudo apt-get install -y tesseract-ocr tesseract-ocr-ben tesseract-ocr-eng
+```
 
-### 🐧 Ubuntu / Debian Linux
-
-1. **Install Tesseract and Language Packs via APT**:
-   ```bash
-   sudo apt-get update
-   sudo apt-get install -y tesseract-ocr tesseract-ocr-ben tesseract-ocr-eng
-   ```
-
----
-
-### 🧪 Verify Tesseract Installation
-
-Check that Tesseract is correctly installed and both `ben` (Bangla) and `eng` (English) are available:
+Verify Tesseract languages:
 ```bash
 tesseract --list-langs
-```
-Expected output:
-```
-List of installed languages (3):
-ben
-eng
-osd
+# Expected output includes: ben, eng, osd
 ```
 
 ---
 
-## 🤖 Anthropic Claude AI Cleanup (Optional)
+### 2. FFmpeg Installation (for Multi-Voice Concatenation)
 
-To enable AI text improvement for scanned or imperfect PDFs:
-1. Obtain an API key from [Anthropic Console](https://console.anthropic.com/).
-2. Add your key to `backend/.env` (or copy from `backend/.env.example`):
-   ```env
-   ANTHROPIC_API_KEY=sk-ant-api03-...
-   ANTHROPIC_MODEL=claude-3-haiku-20240307
-   ```
-3. When uploading a book in the web app, check the **"Improve text with AI (needs API key)"** checkbox.
-4. The system segments text into ~3,000 character chunks, runs the cleanup prompt, checks length sanity (90%–110%), and caches responses by segment hash so subsequent runs are instant and free. If no key is set or the API fails, it seamlessly falls back to standard regex cleanup.
-
----
-
-## 🚀 How to Run
-
-### 1. Start the Backend
-Open a terminal in the project directory:
-
+#### 🪟 Windows:
 ```powershell
-# Activate Python virtual environment and set PYTHONPATH
-$env:PYTHONPATH = "c:\Users\USER\Desktop\BOOK READER"
+winget install Gyan.FFmpeg
+```
+*(Verify by running `ffmpeg -version` in a new PowerShell window).*
+
+#### 🍎 macOS:
+```bash
+brew install ffmpeg
+```
+
+#### 🐧 Linux (Ubuntu / Debian):
+```bash
+sudo apt-get install -y ffmpeg
+```
+
+---
+
+## 🚀 Setup Steps: Backend
+
+### 1. Navigate to the project root
+```bash
+cd "c:\Users\USER\Desktop\BOOK READER"
+```
+
+### 2. Create and activate a Python virtual environment
+```powershell
+# Windows PowerShell:
+python -m venv backend\.venv
+.\backend\.venv\Scripts\Activate.ps1
+
+# Linux / macOS:
+python3 -m venv backend/.venv
+source backend/.venv/bin/activate
+```
+
+### 3. Install Python dependencies
+```bash
+pip install -r backend/requirements.txt
+```
+
+### 4. Configure environment variables
+Copy the example environment configuration:
+```powershell
+# Windows:
+Copy-Item backend\.env.example backend\.env
+
+# Linux / macOS:
+cp backend/.env.example backend/.env
+```
+
+Edit `backend/.env` with your preferred configurations:
+```env
+# Server
+HOST=127.0.0.1
+PORT=8000
+DEBUG=True
+
+# CORS
+CORS_ORIGIN=http://localhost:5173
+
+# Database & Storage
+DATABASE_URL=sqlite:///./backend/storage/storyteller.db
+STORAGE_DIR=backend/storage
+
+# TTS Provider Defaults
+DEFAULT_TTS_PROVIDER=edge_tts
+DEFAULT_ENGLISH_VOICE=en-US-ChristopherNeural
+DEFAULT_BANGLA_VOICE=bn-BD-PradeepNeural
+
+# Optional: ElevenLabs TTS API Key
+ELEVENLABS_API_KEY=your_elevenlabs_api_key_here
+
+# Optional: Anthropic Claude API Key (for AI text cleanup & multi-voice casting)
+ANTHROPIC_API_KEY=your_anthropic_api_key_here
+ANTHROPIC_MODEL=claude-3-5-sonnet-20241022
+```
+
+### 5. Start the FastAPI backend server
+```powershell
+# Windows (PowerShell):
+$env:PYTHONPATH = (Get-Location).Path
 backend\.venv\Scripts\python.exe -m uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
+
+# Linux / macOS:
+export PYTHONPATH=$(pwd)
+backend/.venv/bin/uvicorn backend.app.main:app --host 127.0.0.1 --port 8000 --reload
 ```
 
-The FastAPI API and Swagger docs will be available at:
-- **API URL**: [http://127.0.0.1:8000](http://127.0.0.1:8000)
-- **Interactive Swagger Docs**: [http://127.0.0.1:8000/docs](http://127.0.0.1:8000/docs)
+The API will be available at:
+- **API Base URL**: `http://127.0.0.1:8000`
+- **Swagger Interactive Documentation**: `http://127.0.0.1:8000/docs`
+- **ReDoc Documentation**: `http://127.0.0.1:8000/redoc`
 
-### 2. Start the Frontend
-In a second terminal:
+---
 
-```powershell
+## 🎨 Setup Steps: Frontend
+
+### 1. Open a new terminal and navigate to the frontend directory
+```bash
 cd frontend
-npm.cmd run dev
+```
+
+### 2. Install Node dependencies
+```bash
+npm install
+```
+
+### 3. Configure frontend environment variables
+Ensure `frontend/.env` contains your backend API URL:
+```env
+VITE_API_URL=http://127.0.0.1:8000
+```
+*(If missing, copy from `frontend/.env.example`)*:
+```bash
+cp .env.example .env
+```
+
+### 4. Start the frontend development server
+```bash
+npm run dev
 ```
 
 Open your browser at:
-- **Web App**: [http://127.0.0.1:5173](http://127.0.0.1:5173)
+- **Web Application**: `http://localhost:5173`
+
+### 5. Build for production (Optional)
+To validate or produce a production bundle:
+```bash
+npm run build
+```
+Output files will be generated in `frontend/dist/`.
 
 ---
 
-## 🧪 How to Test
+## 🧪 Running Tests & Sample Books
 
-Two pre-generated sample storybooks are available in `sample_books/`:
-1. `sample_books/english_story_whispering_tree.pdf` (*The Whispering Tree and the Starlight Deer*)
-2. `sample_books/bangla_story_blue_dove.pdf` (*ছোট্ট নীল ঘুঘু ও সোনালী নদী*)
-
-### Testing via Web UI:
-1. Open [http://127.0.0.1:5173](http://127.0.0.1:5173).
-2. Upload a new PDF using the drag-and-drop uploader or select an existing book from the library.
-3. Click **"Listen & Read"** on any storybook card.
-4. Select a storytelling voice from the dropdown.
-5. Click the **Play** button on any sentence to listen to the narration.
-6. Check that the bottom audio player plays and automatically advances to the next sentence.
-
-### Testing Audio File Storage:
-Verify that synthesized audio files follow the requested path format:
+### 1. Run Automated Test Suite
+Run the comprehensive pytest suite covering API endpoints, models, chunking, OCR extraction, audio caching, and multi-voice synthesis:
 ```powershell
-Get-ChildItem -Recurse "backend\storage\*\chunk_*.mp3"
+backend\.venv\Scripts\python.exe -m pytest backend\tests -v
 ```
-Output pattern:
-```
-backend/storage/<book_id>/chunk_001.mp3
-backend/storage/<book_id>/chunk_002.mp3
-...
-```
+
+### 2. Test with Included Sample Storybooks
+Pre-formatted sample storybooks are provided in `sample_books/`:
+- `sample_books/english_story_whispering_tree.pdf` (*The Whispering Tree and the Starlight Deer*)
+- `sample_books/bangla_story_blue_dove.pdf` (*ছোট্ট নীল ঘুঘু ও সোনালী নদী*)
+
+Upload either PDF via the web UI at `http://localhost:5173` to test:
+1. Normal text extraction and sentence chunking.
+2. Voice preview and provider switching (`Edge TTS` vs `ElevenLabs`).
+3. Multi-voice character toggle.
+4. Real-time audio generation and playback.
+
+---
+
+## ⚠️ Known Limitations & Constraints
+
+1. **Path Traversal & Directory Creation in Audio Endpoint**:
+   - In `GET /api/audio/{book_id}/{filename}`, `book_id` is passed directly to `get_book_storage_dir(book_id)`, which runs `mkdir(parents=True, exist_ok=True)` without prior verification that `book_id` exists in the database.
+   - The resolved file path is not currently validated using `.is_relative_to(STORAGE_DIR)` to enforce that requests cannot escape the designated storage directory.
+2. **Multi-Voice Missing in Chunk Retry**:
+   - The `retry_failed_chunks` background task calls `tts_provider.synthesize` with a single voice rather than checking `book.multi_voice` and routing through `synthesize_multivoice_chunk`. Retrying failed chunks on a multi-voice book reverts those specific chunks to single-voice audio.
+3. **In-Process Background Task Execution & SQLite Concurrency**:
+   - Book processing is queued using FastAPI's in-memory `BackgroundTasks`. Tasks do not survive server restarts, and tasks cannot be distributed across worker processes or multiple instances.
+   - SQLite uses file-level locking (`WAL` mode is not explicitly configured), which can raise `database is locked` errors if multiple books are uploaded and processed simultaneously under high concurrency.
+4. **Local Ephemeral File Storage**:
+   - Uploaded PDFs and synthesized audio files are written directly to `backend/storage/`. In containerized environments (Docker, Kubernetes) without persistent volume mounts, stored books and audio files will be lost on container restart.
+5. **OCR Resource Intensity & External Binary Dependency**:
+   - Optical Character Recognition on large, high-resolution scanned PDFs (200 DPI) is CPU- and memory-intensive.
+   - If Tesseract is not installed or `ben.traineddata` is missing on the host machine, scanned PDF uploads fail with an error.
+6. **TTS Rate Limits & External API Quotas**:
+   - Microsoft Edge TTS relies on Microsoft Edge's public WebSocket endpoint, which is subject to undocumented throttling or regional latency.
+   - ElevenLabs and Anthropic Claude require valid API keys and paid usage tiers; processing long books (>= 10,000 characters) consumes significant quota.
+7. **No Authentication or Multi-Tenant Isolation**:
+   - The API currently lacks authentication, authorization, and tenant isolation; all uploaded books, audio chunks, and deletion endpoints are publicly accessible to anyone with network access to the API.

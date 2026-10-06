@@ -8,9 +8,11 @@ import {
   Play,
   Pause,
   AlertTriangle,
-  BookOpen,
+  RotateCcw,
+  AlertCircle,
+  CheckCircle2,
 } from 'lucide-react';
-import { fetchBook, fetchBookChunks } from '../api';
+import { fetchBook, fetchBookChunks, retryBook } from '../api';
 import { usePlayer } from '../hooks/usePlayer';
 import AudioPlayerBar from '../components/AudioPlayerBar';
 import ErrorMessageBox from '../components/ErrorMessageBox';
@@ -30,12 +32,35 @@ export default function PlayerPage() {
   const [chunks, setChunks] = useState([]);
   const [loading, setLoading] = useState(true);
   const [errorMessage, setErrorMessage] = useState(null);
+  const [retrying, setRetrying] = useState(false);
+  const [retryNotification, setRetryNotification] = useState(null);
+  const [pollKey, setPollKey] = useState(0);
 
   // Custom player hook managing audio, preloading, MediaSession, and persistence
   const player = usePlayer(id, book, chunks);
   const { activeChunkIndex, isPlaying, playChunk, pause } = player;
 
   const activeChunkCardRef = useRef(null);
+
+  // Trigger retry for failed chunks
+  const handleRetry = async () => {
+    if (retrying) return;
+    try {
+      setRetrying(true);
+      setErrorMessage(null);
+      setRetryNotification(null);
+      const res = await retryBook(id);
+      setBook((prev) => (prev ? { ...prev, status: 'generating', error_message: null } : prev));
+      setRetryNotification(res.message || 'Queued failed chunks for retry.');
+      // Increment pollKey to restart/resume polling interval
+      setPollKey((k) => k + 1);
+      setTimeout(() => setRetryNotification(null), 6000);
+    } catch (err) {
+      setErrorMessage(err.message || 'Failed to retry failed chunks.');
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   // 1. Initial data fetch and background generation polling
   useEffect(() => {
@@ -83,7 +108,7 @@ export default function PlayerPage() {
       isMounted = false;
       clearInterval(intervalId);
     };
-  }, [id]);
+  }, [id, pollKey]);
 
   // 2. Auto-scroll active chunk into view smoothly
   useEffect(() => {
@@ -125,6 +150,8 @@ export default function PlayerPage() {
   const doneChunks = book?.done_chunks || chunks.filter((c) => c.status === 'done').length;
   const progressPercent = totalChunks > 0 ? Math.round((doneChunks / totalChunks) * 100) : 0;
   const isGenerating = book?.status === 'generating' || book?.status === 'extracting';
+  const failedChunks = chunks.filter((c) => c.status === 'failed');
+  const hasFailed = failedChunks.length > 0 || book?.status === 'failed';
 
   return (
     <div
@@ -154,6 +181,32 @@ export default function PlayerPage() {
               {book.voice}
             </span>
           )}
+          {book?.provider && (
+            <span
+              className="badge"
+              style={{
+                background: book.provider === 'elevenlabs' ? 'rgba(236, 72, 153, 0.15)' : 'rgba(59, 130, 246, 0.15)',
+                color: book.provider === 'elevenlabs' ? '#f472b6' : '#60a5fa',
+                border: `1px solid ${
+                  book.provider === 'elevenlabs' ? 'rgba(236, 72, 153, 0.3)' : 'rgba(59, 130, 246, 0.3)'
+                }`,
+              }}
+            >
+              {book.provider === 'elevenlabs' ? 'ElevenLabs' : 'Edge TTS'}
+            </span>
+          )}
+          {book?.multi_voice && (
+            <span
+              className="badge"
+              style={{
+                background: 'rgba(16, 185, 129, 0.15)',
+                color: '#34d399',
+                border: '1px solid rgba(16, 185, 129, 0.3)',
+              }}
+            >
+              🎭 Cast Mode
+            </span>
+          )}
           {book?.total_characters > 0 && (
             <span
               className="badge"
@@ -169,6 +222,28 @@ export default function PlayerPage() {
           )}
         </div>
       </div>
+
+      {/* Retry Notification Toast */}
+      {retryNotification && (
+        <div
+          className="glass-panel"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '10px',
+            padding: '12px 18px',
+            marginBottom: '20px',
+            borderRadius: 'var(--radius-md)',
+            background: 'rgba(16, 185, 129, 0.12)',
+            border: '1px solid rgba(16, 185, 129, 0.4)',
+            color: '#34d399',
+            fontSize: '0.9rem',
+          }}
+        >
+          <CheckCircle2 size={18} style={{ flexShrink: 0 }} />
+          <span>{retryNotification}</span>
+        </div>
+      )}
 
       {/* Error Message Box */}
       <ErrorMessageBox error={errorMessage} onDismiss={() => setErrorMessage(null)} />
@@ -257,34 +332,139 @@ export default function PlayerPage() {
             )}
           </span>
 
-          <span
-            className="badge"
-            style={{
-              background: book?.status === 'ready' ? 'rgba(16, 185, 129, 0.15)' : 'rgba(99, 102, 241, 0.15)',
-              color: book?.status === 'ready' ? '#34d399' : '#818cf8',
-              fontSize: '0.82rem',
-              padding: '4px 10px',
-            }}
-          >
-            {isGenerating ? (
-              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
-                <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
-                Generating audio ({doneChunks}/{totalChunks} done)
-              </span>
-            ) : (
-              `Narration ${book?.status}`
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            {hasFailed && !isGenerating && (
+              <button
+                type="button"
+                className="btn btn-secondary retry-failed-btn"
+                onClick={handleRetry}
+                disabled={retrying}
+                style={{
+                  padding: '5px 14px',
+                  fontSize: '0.82rem',
+                  fontWeight: 600,
+                  display: 'inline-flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  color: '#f87171',
+                  borderColor: 'rgba(239, 68, 68, 0.4)',
+                  background: 'rgba(239, 68, 68, 0.12)',
+                }}
+                title="Regenerate audio for failed chunks"
+              >
+                {retrying ? (
+                  <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                ) : (
+                  <RotateCcw size={13} />
+                )}
+                <span>Retry Failed Chunks {failedChunks.length > 0 ? `(${failedChunks.length})` : ''}</span>
+              </button>
             )}
-          </span>
+
+            <span
+              className="badge"
+              style={{
+                background: book?.status === 'ready'
+                  ? 'rgba(16, 185, 129, 0.15)'
+                  : book?.status === 'failed'
+                  ? 'rgba(239, 68, 68, 0.15)'
+                  : 'rgba(99, 102, 241, 0.15)',
+                color: book?.status === 'ready' ? '#34d399' : book?.status === 'failed' ? '#f87171' : '#818cf8',
+                border: `1px solid ${
+                  book?.status === 'ready'
+                    ? 'rgba(16, 185, 129, 0.3)'
+                    : book?.status === 'failed'
+                    ? 'rgba(239, 68, 68, 0.3)'
+                    : 'rgba(99, 102, 241, 0.3)'
+                }`,
+                fontSize: '0.82rem',
+                padding: '4px 10px',
+              }}
+            >
+              {isGenerating ? (
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+                  <Loader2 size={12} style={{ animation: 'spin 1s linear infinite' }} />
+                  Generating audio ({doneChunks}/{totalChunks} done)
+                </span>
+              ) : (
+                `Narration ${book?.status}`
+              )}
+            </span>
+          </div>
         </div>
 
         {/* Progress Track */}
         <div className="progress-track" style={{ height: '6px', margin: '14px 0 6px' }}>
           <div
             className="progress-fill"
-            style={{ width: `${book?.status === 'ready' ? 100 : progressPercent}%` }}
+            style={{
+              width: `${book?.status === 'ready' ? 100 : progressPercent}%`,
+              background: book?.status === 'failed'
+                ? '#ef4444'
+                : 'linear-gradient(90deg, var(--accent-primary), #10b981)',
+            }}
           />
         </div>
       </div>
+
+      {/* Prominent Failure Banner with Retry Button */}
+      {hasFailed && !isGenerating && (
+        <div
+          className="failed-chunks-alert"
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: '12px',
+            padding: '14px 20px',
+            marginBottom: '24px',
+            borderRadius: 'var(--radius-md)',
+            background: 'rgba(239, 68, 68, 0.1)',
+            border: '1px solid rgba(239, 68, 68, 0.35)',
+            color: '#fca5a5',
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            <AlertCircle size={22} style={{ flexShrink: 0, color: '#ef4444' }} />
+            <div>
+              <strong style={{ color: '#ef4444', display: 'block', fontSize: '0.95rem', marginBottom: '2px' }}>
+                Audio Synthesis Incomplete
+              </strong>
+              <span style={{ fontSize: '0.88rem' }}>
+                {book?.error_message ||
+                  `${failedChunks.length > 0 ? `${failedChunks.length} chunk(s)` : 'Some chunks'} failed to synthesize audio. Click retry to regenerate only the failed chunks.`}
+              </span>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={handleRetry}
+            disabled={retrying}
+            style={{
+              padding: '8px 18px',
+              fontSize: '0.88rem',
+              fontWeight: 600,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '8px',
+              background: 'linear-gradient(135deg, #ef4444 0%, #dc2626 100%)',
+              borderColor: '#ef4444',
+              color: '#ffffff',
+              boxShadow: '0 4px 12px rgba(239, 68, 68, 0.25)',
+            }}
+          >
+            {retrying ? (
+              <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
+            ) : (
+              <RotateCcw size={16} />
+            )}
+            Retry Failed Chunks
+          </button>
+        </div>
+      )}
 
       {/* Ordered Chunks Narrative List */}
       <div className="chunks-list" style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
@@ -297,18 +477,26 @@ export default function PlayerPage() {
             const isActive = chunk.index === activeChunkIndex;
             const isDone = chunk.status === 'done';
             const isChunkFailed = chunk.status === 'failed';
-            const isChunkGenerating = chunk.status === 'pending' || !isDone;
+            const isChunkGenerating = chunk.status === 'pending' || (!isDone && !isChunkFailed);
 
             return (
               <div
                 key={chunk.id || chunk.index}
                 ref={isActive ? activeChunkCardRef : null}
                 className={`chunk-row ${isActive ? 'active' : ''}`}
-                onClick={() => playChunk(chunk.index, 0)}
+                onClick={() => {
+                  if (isChunkFailed) {
+                    handleRetry();
+                  } else {
+                    playChunk(chunk.index, 0);
+                  }
+                }}
                 style={{
                   background: isActive ? 'var(--chunk-active-bg)' : 'var(--card-bg)',
                   border: isActive
                     ? '1.5px solid var(--accent-primary)'
+                    : isChunkFailed
+                    ? '1px solid rgba(239, 68, 68, 0.35)'
                     : '1px solid var(--card-border)',
                   borderRadius: 'var(--radius-md)',
                   padding: '18px 22px',
@@ -326,17 +514,33 @@ export default function PlayerPage() {
                   className="chunk-play-btn"
                   onClick={(e) => {
                     e.stopPropagation();
-                    if (isActive && isPlaying) {
+                    if (isChunkFailed) {
+                      handleRetry();
+                    } else if (isActive && isPlaying) {
                       pause();
                     } else {
                       playChunk(chunk.index, 0);
                     }
                   }}
-                  title={isActive && isPlaying ? 'Pause' : 'Play sentence'}
-                  aria-label={isActive && isPlaying ? 'Pause' : 'Play sentence'}
+                  title={
+                    isChunkFailed
+                      ? 'Retry failed audio synthesis'
+                      : isActive && isPlaying
+                      ? 'Pause'
+                      : 'Play sentence'
+                  }
+                  aria-label={
+                    isChunkFailed
+                      ? 'Retry failed audio synthesis'
+                      : isActive && isPlaying
+                      ? 'Pause'
+                      : 'Play sentence'
+                  }
                 >
                   {isChunkGenerating ? (
                     <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
+                  ) : isChunkFailed ? (
+                    <RotateCcw size={15} style={{ color: '#ef4444' }} />
                   ) : isActive && isPlaying ? (
                     <Pause size={16} />
                   ) : (
@@ -367,15 +571,46 @@ export default function PlayerPage() {
                       )}
                     </div>
 
-                    {/* Chunk status badge */}
+                    {/* Chunk status badge & inline retry button */}
                     {isChunkGenerating ? (
                       <span className="badge badge-generating" style={{ fontSize: '0.72rem', padding: '2px 8px' }}>
                         Generating...
                       </span>
                     ) : isChunkFailed ? (
-                      <span style={{ fontSize: '0.72rem', color: '#ef4444', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
-                        <AlertTriangle size={12} /> Failed
-                      </span>
+                      <div style={{ display: 'inline-flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ fontSize: '0.72rem', color: '#ef4444', display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                          <AlertTriangle size={12} /> Failed
+                        </span>
+                        <button
+                          type="button"
+                          className="btn btn-secondary chunk-retry-btn"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            handleRetry();
+                          }}
+                          disabled={retrying}
+                          title="Retry synthesizing failed chunks"
+                          style={{
+                            padding: '2px 8px',
+                            fontSize: '0.72rem',
+                            fontWeight: 600,
+                            display: 'inline-flex',
+                            alignItems: 'center',
+                            gap: '4px',
+                            color: '#f87171',
+                            borderColor: 'rgba(239, 68, 68, 0.4)',
+                            background: 'rgba(239, 68, 68, 0.1)',
+                            borderRadius: '4px',
+                          }}
+                        >
+                          {retrying ? (
+                            <Loader2 size={11} style={{ animation: 'spin 1s linear infinite' }} />
+                          ) : (
+                            <RotateCcw size={11} />
+                          )}
+                          Retry
+                        </button>
+                      </div>
                     ) : null}
                   </div>
 

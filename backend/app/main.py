@@ -25,11 +25,13 @@ from backend.app.config import (
     get_book_storage_dir,
     DEFAULT_ENGLISH_VOICE,
     DEFAULT_BANGLA_VOICE,
+    DEFAULT_ELEVENLABS_VOICE,
+    DEFAULT_TTS_PROVIDER,
 )
 from backend.app.db import init_db, get_db
 from backend.app.models import Book, Chunk
 from backend.app.services.pdf_extract import SCANNED_PDF_WARNING
-from backend.app.services.pipeline import process_book
+from backend.app.services.pipeline import process_book, retry_failed_chunks
 from backend.app.services.tts.edge_tts_provider import list_voices
 
 MAX_FILE_SIZE = 30 * 1024 * 1024  # 30 MB
@@ -78,7 +80,9 @@ async def create_book(
     file: UploadFile = File(...),
     language: str = Form(...),
     voice: Optional[str] = Form(None),
+    provider: Optional[str] = Form(None),
     improve_with_ai: bool = Form(False),
+    multi_voice: bool = Form(False),
     db: Session = Depends(get_db),
 ) -> Dict[str, str]:
     """Upload a storybook PDF (max 30MB), save as original.pdf, and launch background processing.
@@ -88,7 +92,9 @@ async def create_book(
         file: Multipart uploaded PDF file (max 30MB).
         language: Language code, must be 'bn' (Bangla) or 'en' (English).
         voice: Optional voice ID or name to use for speech narration.
+        provider: Optional TTS provider ('elevenlabs' or 'edge_tts').
         improve_with_ai: Optional flag to run AI text cleanup using Anthropic Claude.
+        multi_voice: Optional flag to enable per-character voice casting using Claude.
         db: SQLAlchemy transactional database session.
 
     Returns:
@@ -110,8 +116,15 @@ async def create_book(
             detail="Invalid file type. Only PDF documents (.pdf) are accepted.",
         )
 
-    # 3. Create Book row first to obtain a UUID
-    default_voice = DEFAULT_BANGLA_VOICE if lang_clean == "bn" else DEFAULT_ENGLISH_VOICE
+    # 3. Resolve TTS Provider & Voice
+    prov_raw = (provider or DEFAULT_TTS_PROVIDER).strip().lower()
+    if prov_raw in ("elevenlabs", "eleven_labs", "eleven-labs"):
+        chosen_provider = "elevenlabs"
+        default_voice = DEFAULT_ELEVENLABS_VOICE
+    else:
+        chosen_provider = "edge_tts"
+        default_voice = DEFAULT_BANGLA_VOICE if lang_clean == "bn" else DEFAULT_ENGLISH_VOICE
+
     chosen_voice = voice.strip() if voice and voice.strip() else default_voice
     book_title = Path(filename).stem.replace("_", " ").strip().title() or "Untitled Story"
 
@@ -121,7 +134,9 @@ async def create_book(
         original_filename=filename,
         status="uploaded",
         voice=chosen_voice,
+        provider=chosen_provider,
         improve_with_ai=bool(improve_with_ai),
+        multi_voice=bool(multi_voice),
     )
     db.add(book)
     db.commit()
@@ -202,6 +217,7 @@ def list_books(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
             "status": b.status,
             "is_scanned": bool(getattr(b, "is_scanned", False)),
             "improve_with_ai": bool(getattr(b, "improve_with_ai", False)),
+            "multi_voice": bool(getattr(b, "multi_voice", False)),
             "warning_message": (
                 SCANNED_PDF_WARNING if getattr(b, "is_scanned", False) else None
             ),
@@ -211,6 +227,7 @@ def list_books(db: Session = Depends(get_db)) -> List[Dict[str, Any]]:
             "total_chunks": b.total_chunks,
             "done_chunks": b.done_chunks,
             "voice": b.voice,
+            "provider": getattr(b, "provider", "edge_tts") or "edge_tts",
             "created_at": b.created_at.isoformat() if b.created_at else None,
         }
         for b in books
@@ -243,6 +260,7 @@ def get_book_details(id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         "status": book.status,
         "is_scanned": bool(getattr(book, "is_scanned", False)),
         "improve_with_ai": bool(getattr(book, "improve_with_ai", False)),
+        "multi_voice": bool(getattr(book, "multi_voice", False)),
         "warning_message": (
             SCANNED_PDF_WARNING if getattr(book, "is_scanned", False) else None
         ),
@@ -254,6 +272,7 @@ def get_book_details(id: str, db: Session = Depends(get_db)) -> Dict[str, Any]:
         "progress": progress_ratio,
         "progress_percent": progress_percent,
         "voice": book.voice,
+        "provider": getattr(book, "provider", "edge_tts") or "edge_tts",
         "created_at": book.created_at.isoformat() if book.created_at else None,
     }
 
@@ -285,6 +304,59 @@ def get_book_chunks(id: str, db: Session = Depends(get_db)) -> List[Dict[str, An
         })
 
     return results
+
+
+@app.post("/api/books/{id}/retry")
+def retry_failed_chunks_endpoint(
+    id: str,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+) -> Dict[str, Any]:
+    """Regenerate only failed or uncompleted chunks for a book.
+
+    Args:
+        id: Book identifier (UUID).
+        background_tasks: FastAPI background tasks queue.
+        db: SQLAlchemy session.
+
+    Returns:
+        JSON response with retry status and count of chunks queued for retry.
+    """
+    book = db.query(Book).filter(Book.id == id).first()
+    if not book:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Book with id '{id}' not found.",
+        )
+
+    # Find failed or uncompleted chunks (never regenerate chunks that are already done)
+    failed_chunks = db.query(Chunk).filter(
+        Chunk.book_id == id,
+        Chunk.status != "done",
+    ).all()
+    failed_count = len(failed_chunks)
+
+    if failed_count == 0:
+        return {
+            "id": book.id,
+            "status": book.status,
+            "retried_chunks": 0,
+            "message": "No failed chunks to retry.",
+        }
+
+    # Set book status to generating and clear error
+    book.status = "generating"
+    book.error_message = None
+    db.commit()
+
+    background_tasks.add_task(retry_failed_chunks, id)
+
+    return {
+        "id": book.id,
+        "status": "generating",
+        "retried_chunks": failed_count,
+        "message": f"Queued {failed_count} failed chunk(s) for retry.",
+    }
 
 
 @app.get("/api/audio/{book_id}/{filename}")
@@ -345,6 +417,14 @@ def delete_book(id: str, db: Session = Depends(get_db)) -> Dict[str, str]:
 
 
 @app.get("/api/voices")
-async def get_voices(language: Optional[str] = Query(None)) -> List[Dict[str, Any]]:
-    """Retrieve available TTS storyteller voices optionally filtered by language code."""
+async def get_voices(
+    language: Optional[str] = Query(None),
+    provider: Optional[str] = Query(None),
+) -> List[Dict[str, Any]]:
+    """Retrieve available TTS storyteller voices optionally filtered by language code and provider."""
+    prov_clean = (provider or "").strip().lower()
+    if prov_clean in ("elevenlabs", "eleven_labs", "eleven-labs"):
+        from backend.app.services.tts.elevenlabs_provider import ElevenLabsProvider
+        p = ElevenLabsProvider()
+        return await p.list_voices(language=language)
     return await list_voices(language=language)

@@ -35,6 +35,7 @@ def test_book_and_chunk_models(tmp_path):
         assert book.status == "uploaded"
         assert book.total_chunks == 0
         assert book.done_chunks == 0
+        assert book.total_characters == 0
         assert book.error_message is None
         assert book.created_at is not None
 

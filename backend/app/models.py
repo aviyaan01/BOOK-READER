@@ -28,16 +28,26 @@ class Book(Base):
     )  # "uploaded", "extracting", "generating", "ready", "failed"
     is_scanned = Column(Boolean, default=False, nullable=False)
     improve_with_ai = Column(Boolean, default=False, nullable=False)
+    multi_voice = Column(Boolean, default=False, nullable=False)
     error_message = Column(Text, nullable=True)
     total_chunks = Column(Integer, default=0, nullable=False)
     done_chunks = Column(Integer, default=0, nullable=False)
     total_characters = Column(Integer, default=0, nullable=False)
     voice = Column(String(100), default="en-US-AriaNeural", nullable=False)
+    provider = Column(String(50), default="edge_tts", nullable=False)
     created_at = Column(
         DateTime,
         default=lambda: datetime.now(timezone.utc),
         nullable=False,
     )
+
+    @property
+    def tts_provider(self) -> str:
+        return self.provider
+
+    @tts_provider.setter
+    def tts_provider(self, val: str) -> None:
+        self.provider = val
 
     chunks = relationship(
         "Chunk",

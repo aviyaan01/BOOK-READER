@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Headphones, Loader2, CheckCircle2, AlertTriangle, ArrowRight } from 'lucide-react';
-import { fetchBook } from '../api';
+import { Headphones, Loader2, CheckCircle2, AlertTriangle, ArrowRight, RotateCcw } from 'lucide-react';
+import { fetchBook, retryBook } from '../api';
 
 /**
  * Polls GET /api/books/{id} every 2 seconds, showing progress and the "Start listening" button.
@@ -15,6 +15,21 @@ export default function UploadProgressTracker({ bookId, onStatusChange, onError 
   const navigate = useNavigate();
   const [book, setBook] = useState(null);
   const [pollingError, setPollingError] = useState(null);
+  const [retrying, setRetrying] = useState(false);
+  const [pollKey, setPollKey] = useState(0);
+
+  const handleRetry = async () => {
+    try {
+      setRetrying(true);
+      await retryBook(bookId);
+      setBook((prev) => (prev ? { ...prev, status: 'generating', error_message: null } : prev));
+      setPollKey((k) => k + 1);
+    } catch (err) {
+      if (onError) onError(err.message || 'Failed to retry failed chunks');
+    } finally {
+      setRetrying(false);
+    }
+  };
 
   useEffect(() => {
     if (!bookId) return;
@@ -61,7 +76,7 @@ export default function UploadProgressTracker({ bookId, onStatusChange, onError 
       isMounted = false;
       clearInterval(intervalId);
     };
-  }, [bookId]);
+  }, [bookId, pollKey]);
 
   if (!bookId || !book) {
     return (
@@ -121,6 +136,7 @@ export default function UploadProgressTracker({ bookId, onStatusChange, onError 
 
   const isFailed = status === 'failed';
   const isReady = status === 'ready';
+  const hasFailedChunks = isFailed || (total_chunks > 0 && done_chunks < total_chunks && status !== 'generating' && status !== 'extracting' && status !== 'ready');
 
   return (
     <div
@@ -130,7 +146,7 @@ export default function UploadProgressTracker({ bookId, onStatusChange, onError 
         maxWidth: '720px',
         margin: '0 auto 36px',
         borderRadius: 'var(--radius-lg)',
-        border: isFailed
+        border: isFailed || hasFailedChunks
           ? '1px solid rgba(239, 68, 68, 0.4)'
           : isReady
           ? '1px solid rgba(16, 185, 129, 0.4)'
@@ -256,29 +272,58 @@ export default function UploadProgressTracker({ bookId, onStatusChange, onError 
         />
       </div>
 
-      {/* Action Area: Start Listening Button */}
-      {canStartListening && (
-        <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: '14px' }}>
-          <button
-            type="button"
-            className="btn btn-primary"
-            onClick={() => navigate(`/book/${bookId}`)}
-            style={{
-              padding: '10px 20px',
-              fontSize: '0.92rem',
-              fontWeight: 700,
-              display: 'inline-flex',
-              alignItems: 'center',
-              gap: '8px',
-              background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
-              borderColor: '#10b981',
-              boxShadow: '0 4px 14px rgba(16, 185, 129, 0.3)',
-            }}
-          >
-            <Headphones size={18} />
-            Start listening
-            <ArrowRight size={16} />
-          </button>
+      {/* Action Area: Start Listening & Retry Failed Chunks */}
+      {(canStartListening || hasFailedChunks) && (
+        <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', gap: '12px', marginTop: '14px' }}>
+          {hasFailedChunks && (
+            <button
+              type="button"
+              className="btn btn-secondary"
+              onClick={handleRetry}
+              disabled={retrying}
+              style={{
+                padding: '9px 18px',
+                fontSize: '0.9rem',
+                fontWeight: 600,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                background: 'rgba(239, 68, 68, 0.12)',
+                borderColor: 'rgba(239, 68, 68, 0.4)',
+                color: '#f87171',
+              }}
+            >
+              {retrying ? (
+                <Loader2 size={16} style={{ animation: 'spin 1s linear infinite' }} />
+              ) : (
+                <RotateCcw size={16} />
+              )}
+              Retry Failed Chunks
+            </button>
+          )}
+
+          {canStartListening && (
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={() => navigate(`/book/${bookId}`)}
+              style={{
+                padding: '10px 20px',
+                fontSize: '0.92rem',
+                fontWeight: 700,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '8px',
+                background: 'linear-gradient(135deg, #10b981 0%, #059669 100%)',
+                borderColor: '#10b981',
+                boxShadow: '0 4px 14px rgba(16, 185, 129, 0.3)',
+              }}
+            >
+              <Headphones size={18} />
+              Start listening
+              <ArrowRight size={16} />
+            </button>
+          )}
         </div>
       )}
     </div>

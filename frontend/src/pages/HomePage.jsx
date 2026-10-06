@@ -90,6 +90,7 @@ export default function HomePage() {
       <BookList
         books={books}
         onBookDeleted={handleBookDeleted}
+        onBookUpdated={loadBooks}
         loading={loadingBooks}
         onError={(msg) => setErrorMessage(msg)}
       />
