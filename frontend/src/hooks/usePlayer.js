@@ -330,7 +330,7 @@ export function usePlayer(bookId, book, chunks = []) {
       // Seek to beginning of current chunk
       seekTo(0);
     }
-  }, [playChunk]);
+  }, [playChunk, seekTo]);
 
   // Next chunk
   const nextChunk = useCallback(() => {

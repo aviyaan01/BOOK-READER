@@ -14,7 +14,6 @@ import { fetchBook, retryBook } from '../api';
 export default function UploadProgressTracker({ bookId, onStatusChange, onError }) {
   const navigate = useNavigate();
   const [book, setBook] = useState(null);
-  const [pollingError, setPollingError] = useState(null);
   const [retrying, setRetrying] = useState(false);
   const [pollKey, setPollKey] = useState(0);
 
@@ -56,7 +55,7 @@ export default function UploadProgressTracker({ bookId, onStatusChange, onError 
         }
       } catch (err) {
         if (!isMounted) return;
-        setPollingError(err.message);
+        console.warn('Polling progress error:', err);
       }
       return false;
     }

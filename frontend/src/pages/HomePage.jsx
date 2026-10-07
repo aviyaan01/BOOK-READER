@@ -1,5 +1,5 @@
-import React, { useState, useEffect } from 'react';
-import { Sparkles, BookOpen } from 'lucide-react';
+import React, { useState, useEffect, useCallback } from 'react';
+import { Sparkles } from 'lucide-react';
 import BookUploader from '../components/BookUploader';
 import UploadProgressTracker from '../components/UploadProgressTracker';
 import BookList from '../components/BookList';
@@ -12,12 +12,7 @@ export default function HomePage() {
   const [activeUploadBookId, setActiveUploadBookId] = useState(null);
   const [errorMessage, setErrorMessage] = useState(null);
 
-  // Load previously uploaded books on mount
-  useEffect(() => {
-    loadBooks();
-  }, []);
-
-  const loadBooks = async () => {
+  const loadBooks = useCallback(async () => {
     try {
       setLoadingBooks(true);
       const data = await fetchBooks();
@@ -27,7 +22,12 @@ export default function HomePage() {
     } finally {
       setLoadingBooks(false);
     }
-  };
+  }, []);
+
+  // Load previously uploaded books on mount
+  useEffect(() => {
+    loadBooks();
+  }, [loadBooks]);
 
   const handleUploadSuccess = (result) => {
     if (result && result.id) {

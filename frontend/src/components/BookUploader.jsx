@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { UploadCloud, FileText, Loader2, Sparkles, CheckCircle, Volume2, Globe, Cpu, Users } from 'lucide-react';
+import { UploadCloud, FileText, Loader2, Sparkles, Volume2, Globe, Cpu, Users } from 'lucide-react';
 import { uploadBookPdf, fetchVoices } from '../api';
 
 const MAX_FILE_SIZE_BYTES = 30 * 1024 * 1024; // 30 MB
